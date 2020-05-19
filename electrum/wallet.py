@@ -1,4 +1,4 @@
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2015 Thomas Voegtlin
 #
 # Permission is hereby granted, free of charge, to any person
@@ -370,7 +370,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
             addr = str(addrs[0])
             if not bitcoin.is_address(addr):
                 neutered_addr = addr[:5] + '..' + addr[-2:]
-                raise WalletFileException(f'The addresses in this wallet are not bitcoin addresses.\n'
+                raise WalletFileException(f'The addresses in this wallet are not bitgreen addresses.\n'
                                           f'e.g. {neutered_addr} (length: {len(addr)})')
 
     def calc_unused_change_addresses(self):
@@ -478,7 +478,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         if self.is_watching_only():
             raise Exception(_("This is a watching-only wallet"))
         if not is_address(address):
-            raise Exception(f"Invalid bitcoin address: {address}")
+            raise Exception(f"Invalid bitgreen address: {address}")
         if not self.is_mine(address):
             raise Exception(_('Address not in wallet.') + f' {address}')
         index = self.get_address_index(address)
@@ -1032,7 +1032,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
                 addrs = self.get_change_addresses(slice_start=-self.gap_limit_for_change)
                 change_addrs = [random.choice(addrs)] if addrs else []
         for addr in change_addrs:
-            assert is_address(addr), f"not valid bitcoin address: {addr}"
+            assert is_address(addr), f"not valid bitgreen address: {addr}"
             # note that change addresses are not necessarily ismine
             # in which case this is a no-op
             self.check_address(addr)
@@ -1367,7 +1367,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
                 txin.utxo = self.get_input_tx(txin.prevout.txid.hex(), ignore_network_issues=True)
         # If there is a NON-WITNESS UTXO, but we know input is segwit, add a WITNESS UTXO, based on it.
         # This could have happened if previously another wallet had put a NON-WITNESS UTXO for txin,
-        # as they did not know if it was segwit. This switch is needed to interop with bitcoin core.
+        # as they did not know if it was segwit. This switch is needed to interop with bitgreen core.
         if txin.utxo and Transaction.is_segwit_input(txin):
             txin.convert_utxo_to_witness_utxo()
         txin.ensure_there_is_only_one_utxo()
@@ -1651,7 +1651,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         if req['type'] == PR_TYPE_ONCHAIN:
             addr = req['address']
             if not bitcoin.is_address(addr):
-                raise Exception(_('Invalid Bitcoin address.'))
+                raise Exception(_('Invalid BitGreen address.'))
             if not self.is_mine(addr):
                 raise Exception(_('Address not in wallet.'))
             key = addr
@@ -1801,7 +1801,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         return None
 
     def price_at_timestamp(self, txid, price_func):
-        """Returns fiat price of bitcoin at the time tx got confirmed."""
+        """Returns fiat price of bitgreen at the time tx got confirmed."""
         timestamp = self.get_tx_height(txid).timestamp
         return price_func(timestamp if timestamp else time.time())
 
@@ -2499,8 +2499,8 @@ def restore_wallet_from_text(text, *, path, config: SimpleConfig,
                              passphrase=None, password=None, encrypt_file=True,
                              gap_limit=None) -> dict:
     """Restore a wallet from text. Text can be a seed phrase, a master
-    public key, a master private key, a list of bitcoin addresses
-    or bitcoin private keys."""
+    public key, a master private key, a list of bitgreen addresses
+    or bitgreen private keys."""
     storage = WalletStorage(path)
     if storage.file_exists():
         raise Exception("Remove the existing wallet first!")

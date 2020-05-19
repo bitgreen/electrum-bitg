@@ -14,7 +14,7 @@ install:
 cache:
   - pip: true
   - directories:
-    - /tmp/electrum-build
+    - /tmp/electrum-bitg-build
 script:
     - tox
 after_success:

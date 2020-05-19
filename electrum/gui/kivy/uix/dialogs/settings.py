@@ -17,7 +17,7 @@ Builder.load_string('''
 
 <SettingsDialog@Popup>
     id: settings
-    title: _('Electrum Settings')
+    title: _('Electrum-BITG Settings')
     disable_password: False
     has_pin_code: False
     use_encryption: False
@@ -45,7 +45,7 @@ Builder.load_string('''
                 SettingsItem:
                     bu: app.base_unit
                     title: _('Denomination') + ': ' + self.bu
-                    description: _("Base unit for Bitcoin amounts.")
+                    description: _("Base unit for BitGreen amounts.")
                     action: partial(root.unit_dialog, self)
                 CardSeparator
                 SettingsItem:

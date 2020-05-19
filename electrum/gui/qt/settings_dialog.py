@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2012 thomasv@gitorious
 #
 # Permission is hereby granted, free of charge, to any person
@@ -55,7 +55,7 @@ class SettingsDialog(WindowModalDialog):
         self.need_restart = False
         self.fx = self.window.fx
         self.wallet = self.window.wallet
-        
+
         vbox = QVBoxLayout()
         tabs = QTabWidget()
         gui_widgets = []
@@ -145,7 +145,7 @@ class SettingsDialog(WindowModalDialog):
         # lightning
         lightning_widgets = []
 
-        help_local_wt = _("""If this option is checked, Electrum will
+        help_local_wt = _("""If this option is checked, Electrum-BITG will
 run a local watchtower to watch your channels if your wallet is not
 open. For this to work, your computer needs to be online regularly.""")
         local_wt_cb = QCheckBox(_("Run a local watchtower"))
@@ -156,7 +156,7 @@ open. For this to work, your computer needs to be online regularly.""")
         local_wt_cb.stateChanged.connect(on_local_wt_checked)
         lightning_widgets.append((local_wt_cb, None))
 
-        help_persist = _("""If this option is checked, Electrum will persist as a daemon after
+        help_persist = _("""If this option is checked, Electrum-BITG will persist as a daemon after
 you close all your wallet windows. Use this to keep your local watchtower running""")
         persist_cb = QCheckBox(_("Run as daemon after the GUI is closed"))
         persist_cb.setToolTip(help_persist)
@@ -482,7 +482,7 @@ you close all your wallet windows. Use this to keep your local watchtower runnin
         vbox.addStretch(1)
         vbox.addLayout(Buttons(CloseButton(self)))
         self.setLayout(vbox)
-        
+
     def set_alias_color(self):
         if not self.config.get('alias'):
             self.alias_e.setStyleSheet("")

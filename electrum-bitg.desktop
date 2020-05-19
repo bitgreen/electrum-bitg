@@ -1,0 +1,22 @@
+# If you want Electrum-BITG to appear in a Linux app launcher ("start menu"), install this by doing:
+# sudo desktop-file-install electrum-bitg.desktop
+
+[Desktop Entry]
+Comment=Lightweight BitGreen Client
+Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum-bitg %u"
+GenericName[en_US]=BitGreen Wallet
+GenericName=BitGreen Wallet
+Icon=electrum
+Name[en_US]=Electrum BitGreen Wallet
+Name=Electrum BitGreen Wallet
+Categories=Finance;Network;
+StartupNotify=true
+StartupWMClass=electrum-bitg
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/bitgreen;
+Actions=Testnet;
+
+[Desktop Action Testnet]
+Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum-bitg --testnet %u"
+Name=Testnet mode

@@ -1330,7 +1330,7 @@ class Peer(Logger):
                 chan_feerate = chan.get_latest_feerate(LOCAL)
                 ratio = chan_feerate / feerate_per_kw
                 if ratio < 0.5:
-                    # Note that we trust the Electrum server about fee rates
+                    # Note that we trust the Electrum-BITG server about fee rates
                     # Thus, automated force-closing might not be a good idea
                     # Maybe we should display something in the GUI instead
                     self.logger.warning(

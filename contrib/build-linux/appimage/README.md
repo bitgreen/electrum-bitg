@@ -1,5 +1,5 @@
-AppImage binary for Electrum
-============================
+AppImage binary for Electrum-BITG
+=================================
 
 ✓ _This binary should be reproducible, meaning you should be able to generate
    binaries that match the official releases._
@@ -25,18 +25,18 @@ see [issue #5159](https://github.com/spesmilo/electrum/issues/5159).
 2. Build image
 
     ```
-    $ sudo docker build -t electrum-appimage-builder-img contrib/build-linux/appimage
+    $ sudo docker build -t electrum-bitg-appimage-builder-img contrib/build-linux/appimage
     ```
 
 3. Build binary
 
     ```
     $ sudo docker run -it \
-        --name electrum-appimage-builder-cont \
+        --name electrum-bitg-appimage-builder-cont \
         -v $PWD:/opt/electrum \
         --rm \
         --workdir /opt/electrum/contrib/build-linux/appimage \
-        electrum-appimage-builder-img \
+        electrum-bitg-appimage-builder-img \
         ./build.sh
     ```
 
@@ -51,9 +51,9 @@ Execute the binary as follows: `./electrum*.AppImage --appimage-extract`
 ### How to investigate diff between binaries if reproducibility fails?
 ```
 cd dist/
-./electrum-*-x86_64.AppImage1 --appimage-extract
+./electrum-bitg-*-x86_64.AppImage1 --appimage-extract
 mv squashfs-root/ squashfs-root1/
-./electrum-*-x86_64.AppImage2 --appimage-extract
+./electrum-bitg-*-x86_64.AppImage2 --appimage-extract
 mv squashfs-root/ squashfs-root2/
 $(cd squashfs-root1; find -type f -exec sha256sum '{}' \; > ./../sha256sum1)
 $(cd squashfs-root2; find -type f -exec sha256sum '{}' \; > ./../sha256sum2)

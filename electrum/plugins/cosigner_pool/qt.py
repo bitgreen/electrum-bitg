@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2014 Thomas Voegtlin
 #
 # Permission is hereby granted, free of charge, to any person
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
 
 
-server = ServerProxy('https://cosigner.electrum.org/', allow_none=True)
+server = ServerProxy('https://cosigner.electrum.bitg.org/', allow_none=True)
 
 
 class Listener(util.DaemonThread):

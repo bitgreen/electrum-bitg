@@ -22,7 +22,7 @@ from .bitcoin import COIN
 # A writer MUST encode `amount` as a positive decimal integer with no
 # leading zeroes, SHOULD use the shortest representation possible.
 def shorten_amount(amount):
-    """ Given an amount in bitcoin, shorten it
+    """ Given an amount in bitgreen, shorten it
     """
     # Convert to pico initially
     amount = int(amount * 10**12)
@@ -272,7 +272,7 @@ class LnAddr(object):
         self.signature = None
         self.pubkey = None
         self.currency = constants.net.SEGWIT_HRP if currency is None else currency
-        self.amount = amount  # in bitcoins
+        self.amount = amount  # in BITGs
         self._min_final_cltv_expiry = 9
 
     def __str__(self):

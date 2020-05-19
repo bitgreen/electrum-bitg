@@ -1,5 +1,5 @@
 #
-# BitBox02 Electrum plugin code.
+# BitBox02 Electrum-BITG plugin code.
 #
 
 import hid

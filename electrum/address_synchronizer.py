@@ -1,4 +1,4 @@
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2018 The Electrum Developers
 #
 # Permission is hereby granted, free of charge, to any person
@@ -783,7 +783,7 @@ class AddressSynchronizer(Logger):
 
     @with_local_height_cached
     def get_addr_balance(self, address, *, excluded_coins: Set[str] = None) -> Tuple[int, int, int]:
-        """Return the balance of a bitcoin address:
+        """Return the balance of a bitgreen address:
         confirmed and matured, unconfirmed, unmatured
         """
         if not excluded_coins:  # cache is only used if there are no excluded_coins

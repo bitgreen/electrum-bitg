@@ -144,7 +144,7 @@ class TrezorPlugin(HW_PluginBase):
 
     def enumerate(self):
         # If there is a bridge, prefer that.
-        # On Windows, the bridge runs as Admin (and Electrum usually does not),
+        # On Windows, the bridge runs as Admin (and Electrum-BITG usually does not),
         # so the bridge has better chances of finding devices. see #5420
         # This also avoids duplicate entries.
         try:
@@ -188,7 +188,7 @@ class TrezorPlugin(HW_PluginBase):
         return client
 
     def get_coin_name(self):
-        return "Testnet" if constants.net.TESTNET else "Bitcoin"
+        return "Testnet" if constants.net.TESTNET else "BitGreen"
 
     def initialize_device(self, device_id, wizard, handler):
         # Initialization method

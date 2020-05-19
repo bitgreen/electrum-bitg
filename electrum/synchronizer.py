@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2014 Thomas Voegtlin
 #
 # Permission is hereby granted, free of charge, to any person
@@ -92,7 +92,7 @@ class SynchronizerBase(NetworkJobOnDefaultServer):
         asyncio.run_coroutine_threadsafe(self._add_address(addr), self.asyncio_loop)
 
     async def _add_address(self, addr: str):
-        if not is_address(addr): raise ValueError(f"invalid bitcoin address {addr}")
+        if not is_address(addr): raise ValueError(f"invalid bitgreen address {addr}")
         if addr in self.requested_addrs: return
         self.requested_addrs.add(addr)
         await self.add_queue.put(addr)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Electrum - lightweight Bitcoin client
+# Electrum-BITG - lightweight BitGreen client
 # Copyright (C) 2015 Thomas Voegtlin
 #
 # Permission is hereby granted, free of charge, to any person
@@ -192,8 +192,8 @@ class RequestList(MyTreeView):
         if request_type == PR_TYPE_LN:
             menu.addAction(_("Copy Request"), lambda: self.parent.do_copy(req['invoice'], title='Lightning Request'))
         else:
-            menu.addAction(_("Copy Request"), lambda: self.parent.do_copy(req['URI'], title='Bitcoin URI'))
-            menu.addAction(_("Copy Address"), lambda: self.parent.do_copy(req['address'], title='Bitcoin Address'))
+            menu.addAction(_("Copy Request"), lambda: self.parent.do_copy(req['URI'], title='BitGreen URI'))
+            menu.addAction(_("Copy Address"), lambda: self.parent.do_copy(req['address'], title='BitGreen Address'))
         if 'view_url' in req:
             menu.addAction(_("View in web browser"), lambda: webopen(req['view_url']))
         menu.addAction(_("Delete"), lambda: self.parent.delete_requests([key]))

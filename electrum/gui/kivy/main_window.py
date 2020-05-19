@@ -203,7 +203,7 @@ class ElectrumWindow(App):
 
     def on_new_intent(self, intent):
         data = intent.getDataString()
-        if intent.getScheme() == 'bitcoin':
+        if intent.getScheme() == 'bitgreen':
             self.set_URI(data)
         elif intent.getScheme() == 'lightning':
             self.set_ln_invoice(data)
@@ -419,7 +419,7 @@ class ElectrumWindow(App):
         if is_address(data):
             self.set_URI(data)
             return
-        if data.startswith('bitcoin:'):
+        if data.startswith('bitgreen:'):
             self.set_URI(data)
             return
         if data.startswith('channel_backup:'):
@@ -567,7 +567,7 @@ class ElectrumWindow(App):
         self.fiat_unit = self.fx.ccy if self.fx.is_enabled() else ''
         # default tab
         self.switch_to('history')
-        # bind intent for bitcoin: URI scheme
+        # bind intent for bitgreen: URI scheme
         if platform == 'android':
             from android import activity
             from jnius import autoclass
@@ -963,8 +963,8 @@ class ElectrumWindow(App):
                 from plyer import notification
             icon = (os.path.dirname(os.path.realpath(__file__))
                     + '/../../' + self.icon)
-            notification.notify('Electrum', message,
-                            app_icon=icon, app_name='Electrum')
+            notification.notify('Electrum-BITG', message,
+                            app_icon=icon, app_name='Electrum-BITG')
         except ImportError:
             Logger.Error('Notification: needs plyer; `sudo python3 -m pip install plyer`')
 
@@ -1182,7 +1182,7 @@ class ElectrumWindow(App):
             else:
                 self.show_info('This wallet has channels')
         else:
-            warning1 = _("Lightning support in Electrum is experimental. Do not put large amounts in lightning channels.")
+            warning1 = _("Lightning support in Electrum-BITG is experimental. Do not put large amounts in lightning channels.")
             warning2 = _("Funds stored in lightning channels are not recoverable from your seed. You must backup your wallet file everytime you create a new channel.")
             d = Question(_('Enable Lightning?') + '\n\n' + warning1 + '\n\n' + warning2, self._enable_lightning)
             d.open()

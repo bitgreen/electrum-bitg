@@ -1,5 +1,5 @@
 #
-# Coldcard Electrum plugin main code.
+# Coldcard Electrum-BITG plugin main code.
 #
 #
 import os, time, io
@@ -41,7 +41,7 @@ try:
         # avoid use of pycoin for MiTM message signature test
         def mitm_verify(self, sig, expect_xpub):
             # verify a signature (65 bytes) over the session key, using the master bip32 node
-            # - customized to use specific EC library of Electrum.
+            # - customized to use specific EC library of Electrum-BITG.
             pubkey = BIP32Node.from_xkey(expect_xpub).eckey
             try:
                 pubkey.verify_message_hash(sig[1:65], self.session_key)
@@ -95,7 +95,7 @@ class CKCCClient(HardwareClientBase):
         if expected_xpub is None:
             expected_xpub = self.dev.master_xpub
 
-        if ( (self._expected_device is not None) 
+        if ( (self._expected_device is not None)
                 or (self.dev.master_fingerprint != expected_xfp)
                 or (self.dev.master_xpub != expected_xpub)):
             # probably indicating programing error, not hacking
@@ -146,7 +146,7 @@ class CKCCClient(HardwareClientBase):
         else:
             lab = 'Coldcard ' + xfp2str(self.dev.master_fingerprint)
 
-        # Hack zone: during initial setup I need the xfp and master xpub but 
+        # Hack zone: during initial setup I need the xfp and master xpub but
         # very few objects are passed between the various steps of base_wizard.
         # Solution: return a string with some hidden metadata
         # - see <https://stackoverflow.com/questions/7172772/abc-for-string>
@@ -236,7 +236,7 @@ class CKCCClient(HardwareClientBase):
         # get a file
         return self.dev.download_file(length, checksum, file_number=file_number)
 
-        
+
 
 class Coldcard_KeyStore(Hardware_KeyStore):
     hw_type = 'coldcard'
@@ -313,7 +313,7 @@ class Coldcard_KeyStore(Hardware_KeyStore):
         except (UnicodeError, AssertionError):
             # there are other restrictions on message content,
             # but let the device enforce and report those
-            self.handler.show_error('Only short (%d max) ASCII messages can be signed.' 
+            self.handler.show_error('Only short (%d max) ASCII messages can be signed.'
                                             % MSG_SIGNING_MAX_LENGTH)
             return b''
 
@@ -385,7 +385,7 @@ class Coldcard_KeyStore(Hardware_KeyStore):
                         break
 
                 rlen, rsha = resp
-            
+
                 # download the resulting txn.
                 raw_resp = client.download_file(rlen, rsha)
 
@@ -557,7 +557,7 @@ class ColdcardPlugin(HW_PluginBase):
         # it is participating in. All involved Coldcards can share same file.
         assert isinstance(wallet, Multisig_Wallet)
 
-        print('# Exported from Electrum', file=fp)
+        print('# Exported from Electrum-BITG', file=fp)
         print(f'Name: {name:.20s}', file=fp)
         print(f'Policy: {wallet.m} of {wallet.n}', file=fp)
         print(f'Format: {wallet.txin_type.upper()}' , file=fp)
