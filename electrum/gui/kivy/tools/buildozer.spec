@@ -4,10 +4,10 @@
 title = Electrum-BITG
 
 # (str) Package name
-package.name = Electrum-BITG
+package.name = Electrum
 
 # (str) Package domain (needed for android/ios packaging)
-package.domain = org.bitgreen.electrum
+package.domain = org.bitgreen
 
 # (str) Source code where the main.py live
 source.dir = .
