@@ -587,7 +587,8 @@ class Transaction:
         raw_bytes = bfh(self._cached_network_ser)
         vds = BCDataStream()
         vds.write(raw_bytes)
-        self._version = vds.read_int32()
+        version = vds.read_int32()
+        self._version = int(version & 0xffff)
         n_vin = vds.read_compact_size()
         is_segwit = (n_vin == 0)
         if is_segwit:
@@ -807,7 +808,8 @@ class Transaction:
         note: (not include_sigs) implies force_legacy
         """
         self.deserialize()
-        nVersion = int_to_hex(self.version, 4)
+        nTxType = 1 # TRANSACTION_NORMAL
+        nVersion = int_to_hex(self.version | (nTxType << 16), 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
         outputs = self.outputs()
