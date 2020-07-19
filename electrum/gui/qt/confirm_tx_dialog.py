@@ -38,7 +38,7 @@ from electrum.wallet import InternalAddressCorruption
 from .util import (WindowModalDialog, ColorScheme, HelpLabel, Buttons, CancelButton,
                    BlockingWaitingDialog, PasswordLineEdit)
 
-from .fee_slider import FeeSlider
+from .fee_slider import FeeSlider, FeeComboBox
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
@@ -80,7 +80,7 @@ class TxEditor:
     def get_fee_estimator(self):
         return None
 
-    def update_tx(self):
+    def update_tx(self, *, fallback_to_zero_fee: bool = False):
         fee_estimator = self.get_fee_estimator()
         try:
             self.tx = self.make_tx(fee_estimator)
@@ -89,7 +89,13 @@ class TxEditor:
         except NotEnoughFunds:
             self.not_enough_funds = True
             self.tx = None
-            return
+            if fallback_to_zero_fee:
+                try:
+                    self.tx = self.make_tx(0)
+                except BaseException:
+                    return
+            else:
+                return
         except NoDynamicFeeEstimates:
             self.no_dynfee_estimates = True
             self.tx = None
@@ -146,7 +152,10 @@ class ConfirmTxDialog(TxEditor, WindowModalDialog):
         grid.addWidget(self.extra_fee_value, 2, 1)
 
         self.fee_slider = FeeSlider(self, self.config, self.fee_slider_callback)
+        self.fee_combo = FeeComboBox(self.fee_slider)
+        grid.addWidget(HelpLabel(_("Fee rate") + ": ", self.fee_combo.help_msg), 5, 0)
         grid.addWidget(self.fee_slider, 5, 1)
+        grid.addWidget(self.fee_combo, 5, 2)
 
         self.message_label = QLabel(self.default_message())
         grid.addWidget(self.message_label, 6, 0, 1, -1)

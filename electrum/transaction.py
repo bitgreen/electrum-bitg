@@ -1155,6 +1155,7 @@ class PartialTxInput(TxInput, PSBTSection):
         self._trusted_value_sats = None  # type: Optional[int]
         self._trusted_address = None  # type: Optional[str]
         self.block_height = None  # type: Optional[int]  # height at which the TXO is mined; None means unknown
+        self.spent_height = None  # type: Optional[int]  # height at which the TXO got spent
         self._is_p2sh_segwit = None  # type: Optional[bool]  # None means unknown
         self._is_native_segwit = None  # type: Optional[bool]  # None means unknown
 
@@ -1395,11 +1396,10 @@ class PartialTxInput(TxInput, PSBTSection):
         self.finalize()
 
     def ensure_there_is_only_one_utxo(self):
+        # we prefer having the full previous tx, even for segwit inputs. see #6198
+        # for witness v1, witness_utxo will be enough though
         if self.utxo is not None and self.witness_utxo is not None:
-            if Transaction.is_segwit_input(self):
-                self.utxo = None
-            else:
-                self.witness_utxo = None
+            self.witness_utxo = None
 
     def convert_utxo_to_witness_utxo(self) -> None:
         if self.utxo:
@@ -1968,25 +1968,6 @@ class PartialTransaction(Transaction):
         """
         for txin in self.inputs():
             txin.convert_utxo_to_witness_utxo()
-
-    def is_there_risk_of_burning_coins_as_fees(self) -> bool:
-        """Returns whether there is risk of burning coins as fees if we sign.
-
-        Note:
-            - legacy sighash does not commit to any input amounts
-            - BIP-0143 sighash only commits to the *corresponding* input amount
-            - BIP-taproot sighash commits to *all* input amounts
-        """
-        for txin in self.inputs():
-            # if we have full previous tx, we *know* the input amount
-            if txin.utxo:
-                continue
-            # if we have just the previous output, we only have guarantees if
-            # the sighash commits to this data
-            if txin.witness_utxo and Transaction.is_segwit_input(txin):
-                continue
-            return True
-        return False
 
     def remove_signatures(self):
         for txin in self.inputs():

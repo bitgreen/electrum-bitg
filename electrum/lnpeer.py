@@ -40,10 +40,10 @@ from .lnutil import (Outpoint, LocalConfig, RECEIVED, UpdateAddHtlc,
                      LOCAL, REMOTE, HTLCOwner, generate_keypair, LnKeyFamily,
                      ln_compare_features, privkey_to_pubkey, MIN_FINAL_CLTV_EXPIRY_ACCEPTED,
                      LightningPeerConnectionClosed, HandshakeFailed, NotFoundChanAnnouncementForUpdate,
-                     MINIMUM_MAX_HTLC_VALUE_IN_FLIGHT_ACCEPTED, MAXIMUM_HTLC_MINIMUM_MSAT_ACCEPTED,
-                     MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED, RemoteMisbehaving, DEFAULT_TO_SELF_DELAY,
+                     RemoteMisbehaving,
                      NBLOCK_OUR_CLTV_EXPIRY_DELTA, format_short_channel_id, ShortChannelID,
-                     IncompatibleLightningFeatures, derive_payment_secret_from_payment_preimage)
+                     IncompatibleLightningFeatures, derive_payment_secret_from_payment_preimage,
+                     LN_MAX_FUNDING_SAT, calc_fees_for_commitment_tx)
 from .lnutil import FeeUpdate, channel_id_from_funding_tx
 from .lntransport import LNTransport, LNTransportBase
 from .lnmsg import encode_msg, decode_msg
@@ -53,7 +53,7 @@ from .lnutil import ln_dummy_address
 from .json_db import StoredDict
 
 if TYPE_CHECKING:
-    from .lnworker import LNWorker, LNGossip, LNWallet
+    from .lnworker import LNWorker, LNGossip, LNWallet, LNBackups
     from .lnrouter import RouteEdge, LNPaymentRoute
     from .transaction import PartialTransaction
 
@@ -64,7 +64,12 @@ LN_P2P_NETWORK_TIMEOUT = 20
 class Peer(Logger):
     LOGGING_SHORTCUT = 'P'
 
-    def __init__(self, lnworker: Union['LNGossip', 'LNWallet'], pubkey:bytes, transport: LNTransportBase):
+    def __init__(
+            self,
+            lnworker: Union['LNGossip', 'LNWallet', 'LNBackups'],
+            pubkey: bytes,
+            transport: LNTransportBase
+    ):
         self._sent_init = False  # type: bool
         self._received_init = False  # type: bool
         self.initialized = asyncio.Future()
@@ -87,7 +92,7 @@ class Peer(Logger):
         self.temp_id_to_id = {}   # to forward error messages
         self.funding_created_sent = set() # for channels in PREOPENING
         self.funding_signed_sent = set()  # for channels in PREOPENING
-        self.shutdown_received = {}
+        self.shutdown_received = {} # chan_id -> asyncio.Future()
         self.announcement_signatures = defaultdict(asyncio.Queue)
         self.orphan_channel_updates = OrderedDict()
         Logger.__init__(self)
@@ -162,6 +167,10 @@ class Peer(Logger):
 
     def process_message(self, message):
         message_type, payload = decode_msg(message)
+        # only process INIT if we are a backup
+        from .lnworker import LNBackups
+        if isinstance(self.lnworker, LNBackups) and message_type != 'init':
+            return
         if message_type in self.ordered_messages:
             chan_id = payload.get('channel_id') or payload["temporary_channel_id"]
             self.ordered_message_queues[chan_id].put_nowait((message_type, payload))
@@ -425,9 +434,6 @@ class Peer(Logger):
             first_blocknum=first_block,
             number_of_blocks=num_blocks)
 
-    def encode_short_ids(self, ids):
-        return chr(1) + zlib.compress(bfh(''.join(ids)))
-
     def decode_short_ids(self, encoded):
         if encoded[0] == 0:
             decoded = encoded[1:]
@@ -496,33 +502,65 @@ class Peer(Logger):
             # we will want to derive that key
             wallet = self.lnworker.wallet
             assert wallet.txin_type == 'p2wpkh'
-            addr = wallet.get_unused_address()
+            addr = wallet.get_new_sweep_address_for_channel()
             static_remotekey = bfh(wallet.get_public_key(addr))
         else:
             static_remotekey = None
         local_config = LocalConfig.from_seed(
             channel_seed=channel_seed,
             static_remotekey=static_remotekey,
-            to_self_delay=DEFAULT_TO_SELF_DELAY,
-            dust_limit_sat=546,
+            to_self_delay=self.network.config.get('lightning_to_self_delay', 7 * 144),
+            dust_limit_sat=bitcoin.DUST_LIMIT_DEFAULT_SAT_LEGACY,
             max_htlc_value_in_flight_msat=funding_sat * 1000,
             max_accepted_htlcs=5,
             initial_msat=initial_msat,
-            reserve_sat=546,
+            reserve_sat=funding_sat // 100,
             funding_locked_received=False,
             was_announced=False,
             current_commitment_signature=None,
             current_htlc_signatures=b'',
             htlc_minimum_msat=1,
         )
+        local_config.validate_params(funding_sat=funding_sat)
         return local_config
 
+    def temporarily_reserve_funding_tx_change_address(func):
+        # During the channel open flow, if we initiated, we might have used a change address
+        # of ours in the funding tx. The funding tx is not part of the wallet history
+        # at that point yet, but we should already consider this change address as 'used'.
+        async def wrapper(self: 'Peer', *args, **kwargs):
+            funding_tx = kwargs['funding_tx']  # type: PartialTransaction
+            wallet = self.lnworker.wallet
+            change_addresses = [txout.address for txout in funding_tx.outputs()
+                                if wallet.is_change(txout.address)]
+            for addr in change_addresses:
+                wallet.set_reserved_state_of_address(addr, reserved=True)
+            try:
+                return await func(self, *args, **kwargs)
+            finally:
+                for addr in change_addresses:
+                    self.lnworker.wallet.set_reserved_state_of_address(addr, reserved=False)
+        return wrapper
+
     @log_exceptions
-    async def channel_establishment_flow(self, password: Optional[str], funding_tx: 'PartialTransaction', funding_sat: int,
-                                         push_msat: int, temp_channel_id: bytes) -> Tuple[Channel, 'PartialTransaction']:
+    @temporarily_reserve_funding_tx_change_address
+    async def channel_establishment_flow(
+            self, *,
+            password: Optional[str],
+            funding_tx: 'PartialTransaction',
+            funding_sat: int,
+            push_msat: int,
+            temp_channel_id: bytes
+    ) -> Tuple[Channel, 'PartialTransaction']:
         await asyncio.wait_for(self.initialized, LN_P2P_NETWORK_TIMEOUT)
         feerate = self.lnworker.current_feerate_per_kw()
         local_config = self.make_local_config(funding_sat, push_msat, LOCAL)
+        if funding_sat > LN_MAX_FUNDING_SAT:
+            raise Exception(f"MUST set funding_satoshis to less than 2^24 satoshi. {funding_sat} sat > {LN_MAX_FUNDING_SAT}")
+        if push_msat > 1000 * funding_sat:
+            raise Exception(f"MUST set push_msat to equal or less than 1000 * funding_satoshis: {push_msat} msat > {1000 * funding_sat} msat")
+        if funding_sat < lnutil.MIN_FUNDING_SAT:
+            raise Exception(f"funding_sat too low: {funding_sat} < {lnutil.MIN_FUNDING_SAT}")
         # for the first commitment transaction
         per_commitment_secret_first = get_per_commitment_secret_from_seed(local_config.per_commitment_secret_seed,
                                                                           RevocationStore.START_INDEX)
@@ -555,41 +593,31 @@ class Peer(Logger):
             raise Exception(f"minimum depth too low, {funding_txn_minimum_depth}")
         if funding_txn_minimum_depth > 30:
             raise Exception(f"minimum depth too high, {funding_txn_minimum_depth}")
-        remote_dust_limit_sat = payload['dust_limit_satoshis']
-        remote_reserve_sat = self.validate_remote_reserve(payload["channel_reserve_satoshis"], remote_dust_limit_sat, funding_sat)
-        if remote_dust_limit_sat > remote_reserve_sat:
-            raise Exception(f"Remote Lightning peer reports dust_limit_sat > reserve_sat which is a BOLT-02 protocol violation.")
-        htlc_min = payload['htlc_minimum_msat']
-        if htlc_min > MAXIMUM_HTLC_MINIMUM_MSAT_ACCEPTED:
-            raise Exception(f"Remote Lightning peer reports htlc_minimum_msat={htlc_min} mSAT," +
-                    f" which is above Electrums required maximum limit of that parameter ({MAXIMUM_HTLC_MINIMUM_MSAT_ACCEPTED} mSAT).")
-        remote_max = payload['max_htlc_value_in_flight_msat']
-        if remote_max < MINIMUM_MAX_HTLC_VALUE_IN_FLIGHT_ACCEPTED:
-            raise Exception(f"Remote Lightning peer reports max_htlc_value_in_flight_msat at only {remote_max} mSAT" +
-                    f" which is below Electrums required minimum ({MINIMUM_MAX_HTLC_VALUE_IN_FLIGHT_ACCEPTED} mSAT).")
-        max_accepted_htlcs = payload["max_accepted_htlcs"]
-        if max_accepted_htlcs > 483:
-            raise Exception("Remote Lightning peer reports max_accepted_htlcs > 483, which is a BOLT-02 protocol violation.")
-        remote_to_self_delay = payload['to_self_delay']
-        if remote_to_self_delay > MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED:
-            raise Exception(f"Remote Lightning peer reports to_self_delay={remote_to_self_delay}," +
-                    f" which is above Electrums required maximum ({MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED})")
         remote_config = RemoteConfig(
             payment_basepoint=OnlyPubkeyKeypair(payload['payment_basepoint']),
             multisig_key=OnlyPubkeyKeypair(payload["funding_pubkey"]),
             htlc_basepoint=OnlyPubkeyKeypair(payload['htlc_basepoint']),
             delayed_basepoint=OnlyPubkeyKeypair(payload['delayed_payment_basepoint']),
             revocation_basepoint=OnlyPubkeyKeypair(payload['revocation_basepoint']),
-            to_self_delay=remote_to_self_delay,
-            dust_limit_sat=remote_dust_limit_sat,
-            max_htlc_value_in_flight_msat=remote_max,
-            max_accepted_htlcs=max_accepted_htlcs,
+            to_self_delay=payload['to_self_delay'],
+            dust_limit_sat=payload['dust_limit_satoshis'],
+            max_htlc_value_in_flight_msat=payload['max_htlc_value_in_flight_msat'],
+            max_accepted_htlcs=payload["max_accepted_htlcs"],
             initial_msat=push_msat,
-            reserve_sat = remote_reserve_sat,
-            htlc_minimum_msat = htlc_min,
+            reserve_sat=payload["channel_reserve_satoshis"],
+            htlc_minimum_msat=payload['htlc_minimum_msat'],
             next_per_commitment_point=remote_per_commitment_point,
             current_per_commitment_point=None,
         )
+        remote_config.validate_params(funding_sat=funding_sat)
+        # if channel_reserve_satoshis is less than dust_limit_satoshis within the open_channel message:
+        #     MUST reject the channel.
+        if remote_config.reserve_sat < local_config.dust_limit_sat:
+            raise Exception("violated constraint: remote_config.reserve_sat < local_config.dust_limit_sat")
+        # if channel_reserve_satoshis from the open_channel message is less than dust_limit_satoshis:
+        #     MUST reject the channel.
+        if local_config.reserve_sat < remote_config.dust_limit_sat:
+            raise Exception("violated constraint: local_config.reserve_sat < remote_config.dust_limit_sat")
         # replace dummy output in funding tx
         redeem_script = funding_output_script(local_config, remote_config)
         funding_address = bitcoin.redeem_script_to_address('p2wsh', redeem_script)
@@ -653,14 +681,51 @@ class Peer(Logger):
         return StoredDict(chan_dict, None, [])
 
     async def on_open_channel(self, payload):
-        # payload['channel_flags']
         if payload['chain_hash'] != constants.net.rev_genesis_bytes():
             raise Exception('wrong chain_hash')
         funding_sat = payload['funding_satoshis']
         push_msat = payload['push_msat']
-        feerate = payload['feerate_per_kw']
+        feerate = payload['feerate_per_kw']  # note: we are not validating this
         temp_chan_id = payload['temporary_channel_id']
         local_config = self.make_local_config(funding_sat, push_msat, REMOTE)
+        if funding_sat > LN_MAX_FUNDING_SAT:
+            raise Exception(f"MUST set funding_satoshis to less than 2^24 satoshi. {funding_sat} sat > {LN_MAX_FUNDING_SAT}")
+        if push_msat > 1000 * funding_sat:
+            raise Exception(f"MUST set push_msat to equal or less than 1000 * funding_satoshis: {push_msat} msat > {1000 * funding_sat} msat")
+        if funding_sat < lnutil.MIN_FUNDING_SAT:
+            raise Exception(f"funding_sat too low: {funding_sat} < {lnutil.MIN_FUNDING_SAT}")
+        remote_config = RemoteConfig(
+            payment_basepoint=OnlyPubkeyKeypair(payload['payment_basepoint']),
+            multisig_key=OnlyPubkeyKeypair(payload['funding_pubkey']),
+            htlc_basepoint=OnlyPubkeyKeypair(payload['htlc_basepoint']),
+            delayed_basepoint=OnlyPubkeyKeypair(payload['delayed_payment_basepoint']),
+            revocation_basepoint=OnlyPubkeyKeypair(payload['revocation_basepoint']),
+            to_self_delay=payload['to_self_delay'],
+            dust_limit_sat=payload['dust_limit_satoshis'],
+            max_htlc_value_in_flight_msat=payload['max_htlc_value_in_flight_msat'],
+            max_accepted_htlcs=payload['max_accepted_htlcs'],
+            initial_msat=funding_sat * 1000 - push_msat,
+            reserve_sat=payload['channel_reserve_satoshis'],
+            htlc_minimum_msat=payload['htlc_minimum_msat'],
+            next_per_commitment_point=payload['first_per_commitment_point'],
+            current_per_commitment_point=None,
+        )
+        remote_config.validate_params(funding_sat=funding_sat)
+        # The receiving node MUST fail the channel if:
+        #     the funder's amount for the initial commitment transaction is not sufficient for full fee payment.
+        if remote_config.initial_msat < calc_fees_for_commitment_tx(num_htlcs=0,
+                                                                    feerate=feerate,
+                                                                    is_local_initiator=False)[REMOTE]:
+            raise Exception("the funder's amount for the initial commitment transaction is not sufficient for full fee payment")
+        # The receiving node MUST fail the channel if:
+        #     both to_local and to_remote amounts for the initial commitment transaction are
+        #     less than or equal to channel_reserve_satoshis (see BOLT 3).
+        if (local_config.initial_msat <= 1000 * payload['channel_reserve_satoshis']
+                and remote_config.initial_msat <= 1000 * payload['channel_reserve_satoshis']):
+            raise Exception("both to_local and to_remote amounts for the initial commitment transaction are less than or equal to channel_reserve_satoshis")
+        # note: we ignore payload['channel_flags'],  which e.g. contains 'announce_channel'.
+        #       Notably if the remote sets 'announce_channel' to True, we will ignore that too,
+        #       but we will not play along with actually announcing the channel (so we keep it private).
         # for the first commitment transaction
         per_commitment_secret_first = get_per_commitment_secret_from_seed(local_config.per_commitment_secret_seed,
                                                                           RevocationStore.START_INDEX)
@@ -671,7 +736,7 @@ class Peer(Logger):
             dust_limit_satoshis=local_config.dust_limit_sat,
             max_htlc_value_in_flight_msat=local_config.max_htlc_value_in_flight_msat,
             channel_reserve_satoshis=local_config.reserve_sat,
-            htlc_minimum_msat=1000,
+            htlc_minimum_msat=local_config.htlc_minimum_msat,
             minimum_depth=min_depth,
             to_self_delay=local_config.to_self_delay,
             max_accepted_htlcs=local_config.max_accepted_htlcs,
@@ -686,25 +751,6 @@ class Peer(Logger):
         funding_idx = funding_created['funding_output_index']
         funding_txid = bh2u(funding_created['funding_txid'][::-1])
         channel_id, funding_txid_bytes = channel_id_from_funding_tx(funding_txid, funding_idx)
-        remote_balance_sat = funding_sat * 1000 - push_msat
-        remote_dust_limit_sat = payload['dust_limit_satoshis']  # TODO validate
-        remote_reserve_sat = self.validate_remote_reserve(payload['channel_reserve_satoshis'], remote_dust_limit_sat, funding_sat)
-        remote_config = RemoteConfig(
-            payment_basepoint=OnlyPubkeyKeypair(payload['payment_basepoint']),
-            multisig_key=OnlyPubkeyKeypair(payload['funding_pubkey']),
-            htlc_basepoint=OnlyPubkeyKeypair(payload['htlc_basepoint']),
-            delayed_basepoint=OnlyPubkeyKeypair(payload['delayed_payment_basepoint']),
-            revocation_basepoint=OnlyPubkeyKeypair(payload['revocation_basepoint']),
-            to_self_delay=payload['to_self_delay'],
-            dust_limit_sat=remote_dust_limit_sat,
-            max_htlc_value_in_flight_msat=payload['max_htlc_value_in_flight_msat'],  # TODO validate
-            max_accepted_htlcs=payload['max_accepted_htlcs'],  # TODO validate
-            initial_msat=remote_balance_sat,
-            reserve_sat = remote_reserve_sat,
-            htlc_minimum_msat=payload['htlc_minimum_msat'], # TODO validate
-            next_per_commitment_point=payload['first_per_commitment_point'],
-            current_per_commitment_point=None,
-        )
         constraints = ChannelConstraints(capacity=funding_sat, is_initiator=False, funding_txn_minimum_depth=min_depth)
         outpoint = Outpoint(funding_txid, funding_idx)
         chan_dict = self.create_channel_storage(channel_id, outpoint, local_config, remote_config, constraints)
@@ -727,21 +773,14 @@ class Peer(Logger):
         chan.set_state(ChannelState.OPENING)
         self.lnworker.add_new_channel(chan)
 
-    def validate_remote_reserve(self, remote_reserve_sat: int, dust_limit: int, funding_sat: int) -> int:
-        if remote_reserve_sat < dust_limit:
-            raise Exception('protocol violation: reserve < dust_limit')
-        if remote_reserve_sat > funding_sat/100:
-            raise Exception(f'reserve too high: {remote_reserve_sat}, funding_sat: {funding_sat}')
-        return remote_reserve_sat
-
     async def trigger_force_close(self, channel_id):
         await self.initialized
-        latest_point = 0
+        latest_point = secret_to_pubkey(42) # we need a valid point (BOLT2)
         self.send_message(
             "channel_reestablish",
             channel_id=channel_id,
-            next_local_commitment_number=0,
-            next_remote_revocation_number=0,
+            next_commitment_number=0,
+            next_revocation_number=0,
             your_last_per_commitment_secret=0,
             my_current_per_commitment_point=latest_point)
 
@@ -754,7 +793,7 @@ class Peer(Logger):
                              f'already in peer_state {chan.peer_state!r}')
             return
         chan.peer_state = PeerState.REESTABLISHING
-        util.trigger_callback('channel', chan)
+        util.trigger_callback('channel', self.lnworker.wallet, chan)
         # BOLT-02: "A node [...] upon disconnection [...] MUST reverse any uncommitted updates sent by the other side"
         chan.hm.discard_unsigned_remote_updates()
         # ctns
@@ -785,7 +824,13 @@ class Peer(Logger):
         self.logger.info(f'channel_reestablish ({chan.get_id_for_log()}): sent channel_reestablish with '
                          f'(next_local_ctn={next_local_ctn}, '
                          f'oldest_unrevoked_remote_ctn={oldest_unrevoked_remote_ctn})')
-        msg = await self.wait_for_message('channel_reestablish', chan_id)
+        while True:
+            try:
+                msg = await self.wait_for_message('channel_reestablish', chan_id)
+                break
+            except asyncio.TimeoutError:
+                self.logger.info('waiting to receive channel_reestablish...')
+                continue
         their_next_local_ctn = msg["next_commitment_number"]
         their_oldest_unrevoked_remote_ctn = msg["next_revocation_number"]
         their_local_pcp = msg.get("my_current_per_commitment_point")
@@ -901,8 +946,9 @@ class Peer(Logger):
         # checks done
         if chan.is_funded() and chan.config[LOCAL].funding_locked_received:
             self.mark_open(chan)
-        util.trigger_callback('channel', chan)
-        if chan.get_state() == ChannelState.CLOSING:
+        util.trigger_callback('channel', self.lnworker.wallet, chan)
+        # if we have sent a previous shutdown, it must be retransmitted (Bolt2)
+        if chan.get_state() == ChannelState.SHUTDOWN:
             await self.send_shutdown(chan)
 
     def send_funding_locked(self, chan: Channel):
@@ -989,7 +1035,7 @@ class Peer(Logger):
             return
         assert chan.config[LOCAL].funding_locked_received
         chan.set_state(ChannelState.OPEN)
-        util.trigger_callback('channel', chan)
+        util.trigger_callback('channel', self.lnworker.wallet, chan)
         # peer may have sent us a channel update for the incoming direction previously
         pending_channel_update = self.orphan_channel_updates.get(chan.short_channel_id)
         if pending_channel_update:
@@ -1139,6 +1185,7 @@ class Peer(Logger):
             timestamp=int(time.time()),
             htlc_id=htlc_id)
         chan.receive_htlc(htlc, onion_packet)
+        util.trigger_callback('htlc_added', chan, htlc, RECEIVED)
 
     def maybe_forward_htlc(self, chan: Channel, htlc: UpdateAddHtlc, *,
                            onion_packet: OnionPacket, processed_onion: ProcessedOnionPacket
@@ -1282,28 +1329,29 @@ class Peer(Logger):
                           id=htlc_id,
                           payment_preimage=preimage)
 
-    def fail_htlc(self, *, chan: Channel, htlc_id: int, onion_packet: Optional[OnionPacket],
-                  reason: Optional[OnionRoutingFailureMessage], error_bytes: Optional[bytes]):
-        self.logger.info(f"fail_htlc. chan {chan.short_channel_id}. htlc_id {htlc_id}. reason: {reason}")
+    def fail_htlc(self, *, chan: Channel, htlc_id: int, error_bytes: bytes):
+        self.logger.info(f"fail_htlc. chan {chan.short_channel_id}. htlc_id {htlc_id}.")
         assert chan.can_send_ctx_updates(), f"cannot send updates: {chan.short_channel_id}"
         chan.fail_htlc(htlc_id)
-        if onion_packet and reason:
-            error_bytes = construct_onion_error(reason, onion_packet, our_onion_private_key=self.privkey)
-        if error_bytes:
-            self.send_message("update_fail_htlc",
-                              channel_id=chan.channel_id,
-                              id=htlc_id,
-                              len=len(error_bytes),
-                              reason=error_bytes)
-        else:
-            assert reason is not None
-            if not (reason.code & OnionFailureCodeMetaFlag.BADONION and len(reason.data) == 32):
-                raise Exception(f"unexpected reason when sending 'update_fail_malformed_htlc': {reason!r}")
-            self.send_message("update_fail_malformed_htlc",
-                              channel_id=chan.channel_id,
-                              id=htlc_id,
-                              sha256_of_onion=reason.data,
-                              failure_code=reason.code)
+        self.send_message(
+            "update_fail_htlc",
+            channel_id=chan.channel_id,
+            id=htlc_id,
+            len=len(error_bytes),
+            reason=error_bytes)
+
+    def fail_malformed_htlc(self, *, chan: Channel, htlc_id: int, reason: OnionRoutingFailureMessage):
+        self.logger.info(f"fail_malformed_htlc. chan {chan.short_channel_id}. htlc_id {htlc_id}.")
+        assert chan.can_send_ctx_updates(), f"cannot send updates: {chan.short_channel_id}"
+        chan.fail_htlc(htlc_id)
+        if not (reason.code & OnionFailureCodeMetaFlag.BADONION and len(reason.data) == 32):
+            raise Exception(f"unexpected reason when sending 'update_fail_malformed_htlc': {reason!r}")
+        self.send_message(
+            "update_fail_malformed_htlc",
+            channel_id=chan.channel_id,
+            id=htlc_id,
+            sha256_of_onion=reason.data,
+            failure_code=reason.code)
 
     def on_revoke_and_ack(self, chan: Channel, payload):
         if chan.peer_state == PeerState.BAD:
@@ -1398,7 +1446,7 @@ class Peer(Logger):
         while chan.has_pending_changes(REMOTE):
             await asyncio.sleep(0.1)
         self.send_message('shutdown', channel_id=chan.channel_id, len=len(scriptpubkey), scriptpubkey=scriptpubkey)
-        chan.set_state(ChannelState.CLOSING)
+        chan.set_state(ChannelState.SHUTDOWN)
         # can fullfill or fail htlcs. cannot add htlcs, because of CLOSING state
         chan.set_can_send_ctx_updates(True)
 
@@ -1461,12 +1509,17 @@ class Peer(Logger):
         if not chan.constraints.is_initiator:
             send_closing_signed()
         # add signatures
-        closing_tx.add_signature_to_txin(txin_idx=0,
-                                         signing_pubkey=chan.config[LOCAL].multisig_key.pubkey.hex(),
-                                         sig=bh2u(der_sig_from_sig_string(our_sig) + b'\x01'))
-        closing_tx.add_signature_to_txin(txin_idx=0,
-                                         signing_pubkey=chan.config[REMOTE].multisig_key.pubkey.hex(),
-                                         sig=bh2u(der_sig_from_sig_string(their_sig) + b'\x01'))
+        closing_tx.add_signature_to_txin(
+            txin_idx=0,
+            signing_pubkey=chan.config[LOCAL].multisig_key.pubkey.hex(),
+            sig=bh2u(der_sig_from_sig_string(our_sig) + b'\x01'))
+        closing_tx.add_signature_to_txin(
+            txin_idx=0,
+            signing_pubkey=chan.config[REMOTE].multisig_key.pubkey.hex(),
+            sig=bh2u(der_sig_from_sig_string(their_sig) + b'\x01'))
+        # save local transaction and set state
+        self.lnworker.wallet.add_transaction(closing_tx)
+        chan.set_state(ChannelState.CLOSING)
         # broadcast
         await self.network.try_broadcasting(closing_tx, 'closing')
         return closing_tx.txid()
@@ -1496,7 +1549,6 @@ class Peer(Logger):
                     onion_packet_bytes = bytes.fromhex(onion_packet_hex)
                     onion_packet = None
                     try:
-                        if self.network.config.get('test_fail_malformed_htlc'): raise InvalidOnionPubkey()
                         onion_packet = OnionPacket.from_bytes(onion_packet_bytes)
                         processed_onion = process_onion_packet(onion_packet, associated_data=payment_hash, our_onion_private_key=self.privkey)
                     except UnsupportedOnionPacketVersion:
@@ -1507,11 +1559,15 @@ class Peer(Logger):
                         error_reason = OnionRoutingFailureMessage(code=OnionFailureCode.INVALID_ONION_HMAC, data=sha256(onion_packet_bytes))
                     except Exception as e:
                         self.logger.info(f"error processing onion packet: {e!r}")
-                        error_reason = OnionRoutingFailureMessage(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
+                        error_reason = OnionRoutingFailureMessage(code=OnionFailureCode.INVALID_ONION_VERSION, data=sha256(onion_packet_bytes))
                     else:
+                        if self.network.config.get('test_fail_malformed_htlc'):
+                            error_reason = OnionRoutingFailureMessage(code=OnionFailureCode.INVALID_ONION_VERSION, data=sha256(onion_packet_bytes))
                         if self.network.config.get('test_fail_htlcs_with_temp_node_failure'):
                             error_reason = OnionRoutingFailureMessage(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
-                        elif processed_onion.are_we_final:
+
+                    if not error_reason:
+                        if processed_onion.are_we_final:
                             preimage, error_reason = self.maybe_fulfill_htlc(
                                 chan=chan,
                                 htlc=htlc,
@@ -1537,11 +1593,18 @@ class Peer(Logger):
                             self.fulfill_htlc(chan, htlc.htlc_id, preimage)
                             done.add(htlc_id)
                     if error_reason or error_bytes:
-                        self.fail_htlc(chan=chan,
-                                       htlc_id=htlc.htlc_id,
-                                       onion_packet=onion_packet,
-                                       reason=error_reason,
-                                       error_bytes=error_bytes)
+                        if onion_packet and error_reason:
+                            error_bytes = construct_onion_error(error_reason, onion_packet, our_onion_private_key=self.privkey)
+                        if error_bytes:
+                            self.fail_htlc(
+                                chan=chan,
+                                htlc_id=htlc.htlc_id,
+                                error_bytes=error_bytes)
+                        else:
+                            self.fail_malformed_htlc(
+                                chan=chan,
+                                htlc_id=htlc.htlc_id,
+                                reason=error_reason)
                         done.add(htlc_id)
                 # cleanup
                 for htlc_id in done:

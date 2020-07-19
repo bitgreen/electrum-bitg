@@ -63,7 +63,7 @@ folder.
 ## FAQ
 
 ### I changed something but I don't see any differences on the phone. What did I do wrong?
-You probably need to clear the cache: `rm -rf .buildozer/android/platform/build/{build,dists}`
+You probably need to clear the cache: `rm -rf .buildozer/android/platform/build-*/{build,dists}`
 
 
 ### How do I deploy on connected phone for quick testing?
@@ -102,7 +102,7 @@ adb logcat | grep -F "`adb shell ps | grep org.bitgreen.electrum | cut -c14-19`"
 ### Kivy can be run directly on Linux Desktop. How?
 Install Kivy.
 
-Build atlas: `(cd electrum/gui/kivy/; make theming)`
+Build atlas: `(cd contrib/android/; make theming)`
 
 Run electrum-bitg with the `-g` switch: `electrum-bitg -g kivy`
 

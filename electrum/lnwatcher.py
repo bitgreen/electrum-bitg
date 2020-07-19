@@ -11,7 +11,7 @@ from typing import NamedTuple, Dict
 from . import util
 from .sql_db import SqlDB, sql
 from .wallet_db import WalletDB
-from .util import bh2u, bfh, log_exceptions, ignore_exceptions, TxMinedInfo
+from .util import bh2u, bfh, log_exceptions, ignore_exceptions, TxMinedInfo, random_shuffled_copy
 from .address_synchronizer import AddressSynchronizer, TX_HEIGHT_LOCAL, TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_UNCONFIRMED
 from .transaction import Transaction, TxOutpoint
 
@@ -138,7 +138,7 @@ class LNWatcher(AddressSynchronizer):
     def __init__(self, network: 'Network'):
         AddressSynchronizer.__init__(self, WalletDB({}, manual_upgrades=False))
         self.config = network.config
-        self.channels = {}
+        self.callbacks = {} # address -> lambda: coroutine
         self.network = network
         util.register_callback(
             self.on_network_update,
@@ -157,12 +157,19 @@ class LNWatcher(AddressSynchronizer):
     def add_channel(self, outpoint: str, address: str) -> None:
         assert isinstance(outpoint, str)
         assert isinstance(address, str)
-        self.add_address(address)
-        self.channels[address] = outpoint
+        cb = lambda: self.check_onchain_situation(address, outpoint)
+        self.add_callback(address, cb)
 
     async def unwatch_channel(self, address, funding_outpoint):
         self.logger.info(f'unwatching {funding_outpoint}')
-        self.channels.pop(address, None)
+        self.remove_callback(address)
+
+    def remove_callback(self, address):
+        self.callbacks.pop(address, None)
+
+    def add_callback(self, address, callback):
+        self.add_address(address)
+        self.callbacks[address] = callback
 
     @log_exceptions
     async def on_network_update(self, event, *args):
@@ -172,9 +179,8 @@ class LNWatcher(AddressSynchronizer):
         if not self.synchronizer:
             self.logger.info("synchronizer not set yet")
             return
-        channels_items = list(self.channels.items())  # copy
-        for address, outpoint in channels_items:
-            await self.check_onchain_situation(address, outpoint)
+        for address, callback in list(self.callbacks.items()):
+            await callback()
 
     async def check_onchain_situation(self, address, funding_outpoint):
         # early return if address has not been added yet
@@ -272,8 +278,8 @@ class WatchTower(LNWatcher):
 
     async def start_watching(self):
         # I need to watch the addresses from sweepstore
-        l = await self.sweepstore.list_channels()
-        for outpoint, address in l:
+        lst = await self.sweepstore.list_channels()
+        for outpoint, address in random_shuffled_copy(lst):
             self.add_channel(outpoint, address)
 
     async def do_breach_remedy(self, funding_outpoint, closing_tx, spenders):

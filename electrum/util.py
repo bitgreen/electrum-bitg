@@ -24,7 +24,7 @@ import binascii
 import os, sys, re, json
 from collections import defaultdict, OrderedDict
 from typing import (NamedTuple, Union, TYPE_CHECKING, Tuple, Optional, Callable, Any,
-                    Sequence, Dict, Generic, TypeVar)
+                    Sequence, Dict, Generic, TypeVar, List, Iterable)
 from datetime import datetime
 import decimal
 from decimal import Decimal
@@ -42,7 +42,9 @@ import time
 from typing import NamedTuple, Optional
 import ssl
 import ipaddress
+from ipaddress import IPv4Address, IPv6Address
 import random
+import attr
 
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
@@ -76,66 +78,6 @@ base_units_inverse = inv_dict(base_units)
 base_units_list = ['BITG', 'mBITG', 'uBITG', 'sat']  # list(dict) does not guarantee order
 
 DECIMAL_POINT_DEFAULT = 8  # BITG
-
-# types of payment requests
-PR_TYPE_ONCHAIN = 0
-PR_TYPE_LN = 2
-
-# status of payment requests
-PR_UNPAID   = 0
-PR_EXPIRED  = 1
-PR_UNKNOWN  = 2     # sent but not propagated
-PR_PAID     = 3     # send and propagated
-PR_INFLIGHT = 4     # unconfirmed
-PR_FAILED   = 5
-PR_ROUTING  = 6
-
-pr_color = {
-    PR_UNPAID:   (.7, .7, .7, 1),
-    PR_PAID:     (.2, .9, .2, 1),
-    PR_UNKNOWN:  (.7, .7, .7, 1),
-    PR_EXPIRED:  (.9, .2, .2, 1),
-    PR_INFLIGHT: (.9, .6, .3, 1),
-    PR_FAILED:   (.9, .2, .2, 1),
-    PR_ROUTING: (.9, .6, .3, 1),
-}
-
-pr_tooltips = {
-    PR_UNPAID:_('Pending'),
-    PR_PAID:_('Paid'),
-    PR_UNKNOWN:_('Unknown'),
-    PR_EXPIRED:_('Expired'),
-    PR_INFLIGHT:_('In progress'),
-    PR_FAILED:_('Failed'),
-    PR_ROUTING: _('Computing route...'),
-}
-
-PR_DEFAULT_EXPIRATION_WHEN_CREATING = 24*60*60  # 1 day
-pr_expiration_values = {
-    0: _('Never'),
-    10*60: _('10 minutes'),
-    60*60: _('1 hour'),
-    24*60*60: _('1 day'),
-    7*24*60*60: _('1 week'),
-}
-assert PR_DEFAULT_EXPIRATION_WHEN_CREATING in pr_expiration_values
-
-
-def get_request_status(req):
-    status = req['status']
-    exp = req.get('exp', 0) or 0
-    if req.get('type') == PR_TYPE_LN and exp == 0:
-        status = PR_EXPIRED  # for BOLT-11 invoices, exp==0 means 0 seconds
-    if req['status'] == PR_UNPAID and exp > 0 and req['time'] + req['exp'] < time.time():
-        status = PR_EXPIRED
-    status_str = pr_tooltips[status]
-    if status == PR_UNPAID:
-        if exp > 0:
-            expiration = exp + req['time']
-            status_str = _('Expires') + ' ' + age(expiration, include_seconds=True)
-        else:
-            status_str = _('Pending')
-    return status, status_str
 
 
 class UnknownBaseUnit(Exception): pass
@@ -236,6 +178,9 @@ class Satoshis(object):
     def __ne__(self, other):
         return not (self == other)
 
+    def __add__(self, other):
+        return Satoshis(self.value + other.value)
+
 
 # note: this is not a NamedTuple as then its json encoding cannot be customized
 class Fiat(object):
@@ -274,6 +219,10 @@ class Fiat(object):
 
     def __ne__(self, other):
         return not (self == other)
+
+    def __add__(self, other):
+        assert self.ccy == other.ccy
+        return Fiat(self.value + other.value, self.ccy)
 
 
 class MyEncoder(json.JSONEncoder):
@@ -633,6 +582,30 @@ def is_non_negative_integer(val) -> bool:
     return False
 
 
+def is_integer(val) -> bool:
+    try:
+        int(val)
+    except:
+        return False
+    else:
+        return True
+
+
+def is_real_number(val, *, as_str: bool = False) -> bool:
+    if as_str:  # only accept str
+        if not isinstance(val, str):
+            return False
+    else:  # only accept int/float/etc.
+        if isinstance(val, str):
+            return False
+    try:
+        Decimal(val)
+    except:
+        return False
+    else:
+        return True
+
+
 def chunks(items, size: int):
     """Break up items, an iterable, into chunks of length size."""
     if size < 1:
@@ -641,7 +614,7 @@ def chunks(items, size: int):
         yield items[i: i + size]
 
 
-def format_satoshis_plain(x, decimal_point = 8) -> str:
+def format_satoshis_plain(x, *, decimal_point=8) -> str:
     """Display a satoshi amount scaled.  Always uses a '.' as a decimal
     point and has no thousands separator"""
     if x == '!':
@@ -653,7 +626,15 @@ def format_satoshis_plain(x, decimal_point = 8) -> str:
 DECIMAL_POINT = localeconv()['decimal_point']  # type: str
 
 
-def format_satoshis(x, num_zeros=0, decimal_point=8, precision=None, is_diff=False, whitespaces=False) -> str:
+def format_satoshis(
+        x,  # in satoshis
+        *,
+        num_zeros=0,
+        decimal_point=8,
+        precision=None,
+        is_diff=False,
+        whitespaces=False,
+) -> str:
     if x is None:
         return 'unknown'
     if x == '!':
@@ -763,9 +744,11 @@ testnet_block_explorers = {
                        {'tx': '', 'addr': ''}),
     'BlockCypher.com': ('https://live.blockcypher.com/btc-testnet/',
                        {'tx': 'tx/', 'addr': 'address/'}),
-    'Blockchain.info': ('https://www.blockchain.com/btctest/',
+    'Blockchain.info': ('https://www.blockchain.com/btc-testnet/',
                        {'tx': 'tx/', 'addr': 'address/'}),
     'Blockstream.info': ('https://blockstream.info/testnet/',
+                        {'tx': 'tx/', 'addr': 'address/'}),
+    'mempool.space': ('https://mempool.space/testnet/',
                         {'tx': 'tx/', 'addr': 'address/'}),
     'smartbit.com.au': ('https://testnet.smartbit.com.au/',
                        {'tx': 'tx/', 'addr': 'address/'}),
@@ -805,6 +788,7 @@ def block_explorer_URL(config: 'SimpleConfig', kind: str, item: str) -> Optional
 class InvalidBitcoinURI(Exception): pass
 
 
+# TODO rename to parse_bip21_uri or similar
 def parse_URI(uri: str, on_pr: Callable = None, *, loop=None) -> dict:
     """Raises InvalidBitcoinURI on malformed URI."""
     from . import bitcoin
@@ -979,11 +963,10 @@ def versiontuple(v):
     return tuple(map(int, (v.split("."))))
 
 
-def import_meta(path, validater, load_meta):
+def read_json_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            d = validater(json.loads(f.read()))
-        load_meta(d)
+            data = json.loads(f.read())
     #backwards compatibility for JSONDecodeError
     except ValueError:
         _logger.exception('')
@@ -991,12 +974,12 @@ def import_meta(path, validater, load_meta):
     except BaseException as e:
         _logger.exception('')
         raise FileImportFailed(e)
+    return data
 
-
-def export_meta(meta, fileName):
+def write_json_file(path, data):
     try:
-        with open(fileName, 'w+', encoding='utf-8') as f:
-            json.dump(meta, f, indent=4, sort_keys=True)
+        with open(path, 'w+', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, sort_keys=True, cls=MyEncoder)
     except (IOError, os.error) as e:
         _logger.exception('')
         raise FileExportFailed(e)
@@ -1250,6 +1233,19 @@ def is_ip_address(x: Union[str, bytes]) -> bool:
         return False
 
 
+def is_private_netaddress(host: str) -> bool:
+    if str(host) in ('localhost', 'localhost.',):
+        return True
+    if host[0] == '[' and host[-1] == ']':  # IPv6
+        host = host[1:-1]
+    try:
+        ip_addr = ipaddress.ip_address(host)  # type: Union[IPv4Address, IPv6Address]
+        return ip_addr.is_private
+    except ValueError:
+        pass  # not an IP
+    return False
+
+
 def list_enabled_bits(x: int) -> Sequence[int]:
     """e.g. 77 (0b1001101) --> (0, 2, 3, 6)"""
     binary = bin(x)[2:]
@@ -1396,3 +1392,42 @@ class MySocksProxy(aiorpcx.SOCKSProxy):
         else:
             raise NotImplementedError  # http proxy not available with aiorpcx
         return ret
+
+
+class JsonRPCClient:
+
+    def __init__(self, session: aiohttp.ClientSession, url: str):
+        self.session = session
+        self.url = url
+        self._id = 0
+
+    async def request(self, endpoint, *args):
+        self._id += 1
+        data = ('{"jsonrpc": "2.0", "id":"%d", "method": "%s", "params": %s }'
+                % (self._id, endpoint, json.dumps(args)))
+        async with self.session.post(self.url, data=data) as resp:
+            if resp.status == 200:
+                r = await resp.json()
+                result = r.get('result')
+                error = r.get('error')
+                if error:
+                    return 'Error: ' + str(error)
+                else:
+                    return result
+            else:
+                text = await resp.text()
+                return 'Error: ' + str(text)
+
+    def add_method(self, endpoint):
+        async def coro(*args):
+            return await self.request(endpoint, *args)
+        setattr(self, endpoint, coro)
+
+
+T = TypeVar('T')
+
+def random_shuffled_copy(x: Iterable[T]) -> List[T]:
+    """Returns a shuffled copy of the input."""
+    x_copy = list(x)  # copy
+    random.shuffle(x_copy)  # shuffle in-place
+    return x_copy

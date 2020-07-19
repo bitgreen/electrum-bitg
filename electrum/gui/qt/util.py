@@ -26,10 +26,11 @@ from PyQt5.QtWidgets import (QPushButton, QLabel, QMessageBox, QHBoxLayout,
 
 from electrum.i18n import _, languages
 from electrum.util import FileImportFailed, FileExportFailed, make_aiohttp_session, resource_path
-from electrum.util import PR_UNPAID, PR_PAID, PR_EXPIRED, PR_INFLIGHT, PR_UNKNOWN, PR_FAILED, PR_ROUTING
+from electrum.invoices import PR_UNPAID, PR_PAID, PR_EXPIRED, PR_INFLIGHT, PR_UNKNOWN, PR_FAILED, PR_ROUTING
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
+    from .installwizard import InstallWizard
 
 
 if platform.system() == 'Windows':
@@ -870,6 +871,7 @@ class ColorScheme:
     RED = ColorSchemeItem("#7c1111", "#f18c8c")
     BLUE = ColorSchemeItem("#123b7c", "#8cb3f2")
     DEFAULT = ColorSchemeItem("black", "white")
+    GRAY = ColorSchemeItem("gray", "gray")
 
     @staticmethod
     def has_dark_background(widget):
@@ -944,19 +946,23 @@ def export_meta_gui(electrum_window, title, exporter):
                                      .format(title, str(filename)))
 
 
-def get_parent_main_window(widget):
+def get_parent_main_window(
+        widget, *, allow_wizard: bool = False,
+) -> Union[None, 'ElectrumWindow', 'InstallWizard']:
     """Returns a reference to the ElectrumWindow this widget belongs to."""
     from .main_window import ElectrumWindow
     from .transaction_dialog import TxDialog
+    from .installwizard import InstallWizard
     for _ in range(100):
         if widget is None:
             return None
         if isinstance(widget, ElectrumWindow):
             return widget
-        elif isinstance(widget, TxDialog):
+        if isinstance(widget, TxDialog):
             return widget.main_window
-        else:
-            widget = widget.parentWidget()
+        if isinstance(widget, InstallWizard) and allow_wizard:
+            return widget
+        widget = widget.parentWidget()
     return None
 
 
