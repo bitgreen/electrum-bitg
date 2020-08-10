@@ -1,8 +1,13 @@
 {
-  "78.47.195.204": {
+  "node1.electrum.bitg.org": {
     "pruning": "-",
     "s": "50002",
     "t": "50001",
+    "version": "1.4"
+  },
+  "bitg-node1.vh0st.me": {
+    "pruning": "-",
+    "s": "50003",
     "version": "1.4"
   }
 }
