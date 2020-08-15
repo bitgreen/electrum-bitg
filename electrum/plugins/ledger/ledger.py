@@ -1,8 +1,8 @@
 from struct import pack, unpack
 import hashlib
 import sys
-import traceback
 from typing import Optional, Tuple
+from binascii import hexlify, unhexlify # for btchip overwrites
 
 from electrum import ecc
 from electrum import bip32
@@ -20,6 +20,7 @@ from electrum.logging import get_logger
 from ..hw_wallet import HW_PluginBase, HardwareClientBase
 from ..hw_wallet.plugin import is_any_tx_output_on_change_branch, validate_op_return_output, LibraryFoundButUnusable
 
+from ...dash_tx import STANDARD_TX
 
 _logger = get_logger(__name__)
 
@@ -32,6 +33,7 @@ try:
     from btchip.bitcoinTransaction import bitcoinTransaction
     from btchip.btchipFirmwareWizard import checkFirmware, updateFirmware
     from btchip.btchipException import BTChipException
+    from btchip.bitcoinVarint import writeVarint
     BTCHIP = True
     BTCHIP_DEBUG = False
 except ImportError:
@@ -46,6 +48,160 @@ SEGWIT_SUPPORT = '1.1.10'
 SEGWIT_SUPPORT_SPECIAL = '1.0.4'
 SEGWIT_TRUSTEDINPUTS = '1.4.0'
 
+# BITG dependent overwrites:
+class btchip_bitgreen(btchip):
+    def __init__(self, dongle):
+        btchip.__init__(self, dongle)
+
+    # change to original btchip: version field has to contain tx version AND type
+    def startUntrustedTransaction(self, newTransaction, inputIndex, outputList, redeemScript, version: bytearray, cashAddr=False, continueSegwit=False):
+        # Start building a fake transaction with the passed inputs
+        segwit = False
+        if newTransaction:
+            for passedOutput in outputList:
+                if ('witness' in passedOutput) and passedOutput['witness']:
+                    segwit = True
+                    break
+        if newTransaction:
+            if segwit:
+                p2 = 0x03 if cashAddr else 0x02
+            else:
+                p2 = 0x00
+        else:
+                p2 = 0x10 if continueSegwit else 0x80
+        apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x00, p2 ]
+        params = bytearray.fromhex(version) # important to use the combined tx version + tx type field
+        writeVarint(len(outputList), params)
+        apdu.append(len(params))
+        apdu.extend(params)
+        self.dongle.exchange(bytearray(apdu))
+        # Loop for each input
+        currentIndex = 0
+        for passedOutput in outputList:
+            if ('sequence' in passedOutput) and passedOutput['sequence']:
+                sequence = bytearray(unhexlify(passedOutput['sequence']))
+            else:
+                sequence = bytearray([0xFF, 0xFF, 0xFF, 0xFF]) # default sequence
+            apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00 ]
+            params = []
+            script = bytearray(redeemScript)
+            if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
+                params.append(0x01)
+            elif ('witness' in passedOutput) and passedOutput['witness']:
+                params.append(0x02)
+            else:
+                params.append(0x00)
+            if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
+                params.append(len(passedOutput['value']))
+            params.extend(passedOutput['value'])
+            if currentIndex != inputIndex:
+                script = bytearray()
+            writeVarint(len(script), params)
+            apdu.append(len(params))
+            apdu.extend(params)
+            self.dongle.exchange(bytearray(apdu))
+            offset = 0
+            while(offset < len(script)):
+                blockLength = 255
+                if ((offset + blockLength) < len(script)):
+                    dataLength = blockLength
+                else:
+                    dataLength = len(script) - offset
+                params = script[offset : offset + dataLength]
+                if ((offset + dataLength) == len(script)):
+                    params.extend(sequence)
+                apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00, len(params) ]
+                apdu.extend(params)
+                self.dongle.exchange(bytearray(apdu))
+                offset += blockLength
+            if len(script) == 0:
+                apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00, len(sequence) ]
+                apdu.extend(sequence)
+                self.dongle.exchange(bytearray(apdu))
+            currentIndex += 1
+
+    # change to original btchip: add possible BitGreen extra_payload data
+    def getTrustedInput(self, transaction, index):
+        result = {}
+        # Header
+        apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x00, 0x00]
+        params = bytearray.fromhex("%.8x" % (index))
+        params.extend(transaction.version)
+        writeVarint(len(transaction.inputs), params)
+        apdu.append(len(params))
+        apdu.extend(params)
+        self.dongle.exchange(bytearray(apdu))
+        # Each input
+        for i, trinput in enumerate(transaction.inputs):
+            apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00]
+            params = bytearray(trinput.prevOut)
+            writeVarint(len(trinput.script), params)
+            apdu.append(len(params))
+            apdu.extend(params)
+            self.dongle.exchange(bytearray(apdu))
+            offset = 0
+            while True:
+                blockLength = 251
+                if ((offset + blockLength) < len(trinput.script)):
+                    dataLength = blockLength
+                else:
+                    dataLength = len(trinput.script) - offset
+                params = bytearray(trinput.script[offset: offset + dataLength])
+                if ((offset + dataLength) == len(trinput.script)):
+                    params.extend(trinput.sequence)
+                apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00, len(params)]
+                apdu.extend(params)
+                self.dongle.exchange(bytearray(apdu))
+                offset += dataLength
+                if (offset >= len(trinput.script)):
+                    break
+        # Number of outputs
+        apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00]
+        params = []
+        writeVarint(len(transaction.outputs), params)
+        apdu.append(len(params))
+        apdu.extend(params)
+        self.dongle.exchange(bytearray(apdu))
+        # Each output
+        for i, troutput in enumerate(transaction.outputs):
+            apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00]
+            params = bytearray(troutput.amount)
+            writeVarint(len(troutput.script), params)
+            apdu.append(len(params))
+            apdu.extend(params)
+            self.dongle.exchange(bytearray(apdu))
+            offset = 0
+            while (offset < len(troutput.script)):
+                blockLength = 255
+                if ((offset + blockLength) < len(troutput.script)):
+                    dataLength = blockLength
+                else:
+                    dataLength = len(troutput.script) - offset
+                apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00, dataLength]
+                apdu.extend(troutput.script[offset: offset + dataLength])
+                self.dongle.exchange(bytearray(apdu))
+                offset += dataLength
+
+        params = []
+        if transaction.extra_data:
+            # Dash DIP2 extra data: By appending data to the 'lockTime' transfer we force the device into the
+            # BTCHIP_TRANSACTION_PROCESS_EXTRA mode, which gives us the opportunity to sneak with an additional
+            # data block.
+            if len(transaction.extra_data) > 255 - len(transaction.lockTime):
+                # for now the size should be sufficient
+                raise Exception('The size of the DIP2 extra data block has exceeded the limit.')
+
+            writeVarint(len(transaction.extra_data), params)
+            params.extend(transaction.extra_data)
+
+        apdu = [self.BTCHIP_CLA, self.BTCHIP_INS_GET_TRUSTED_INPUT, 0x80, 0x00, len(transaction.lockTime) + len(params)]
+        # Locktime
+        apdu.extend(transaction.lockTime)
+        apdu.extend(params)
+        response = self.dongle.exchange(bytearray(apdu))
+        result['trustedInput'] = True
+        result['value'] = response
+        return result
 
 def test_pin_unlocked(func):
     """Function decorator to test the Ledger for being unlocked, and if not,
@@ -66,7 +222,7 @@ class Ledger_Client(HardwareClientBase):
     def __init__(self, hidDevice, *, product_key: Tuple[int, int],
                  plugin: HW_PluginBase):
         HardwareClientBase.__init__(self, plugin=plugin)
-        self.dongleObject = btchip(hidDevice)
+        self.dongleObject = btchip_bitgreen(hidDevice)
         self.preflightDone = False
         self._product_key = product_key
         self._soft_device_id = None
@@ -230,7 +386,7 @@ class Ledger_Client(HardwareClientBase):
                 self.perform_hw1_preflight()
             except BTChipException as e:
                 if (e.sw == 0x6d00 or e.sw == 0x6700):
-                    raise UserFacingException(_("Device not in BitGreen mode")) from e
+                    raise UserFacingException(_("Device not in Bitcoin mode")) from e
                 raise e
             self.preflightDone = True
 
@@ -383,13 +539,21 @@ class Ledger_KeyStore(Hardware_KeyStore):
             if txin_prev_tx is None and not Transaction.is_segwit_input(txin):
                 raise UserFacingException(_('Missing previous tx for legacy input.'))
             txin_prev_tx_raw = txin_prev_tx.serialize() if txin_prev_tx else None
+            txin_prev_tx.deserialize()
+            txtype = txin_prev_tx.txtype
+            extra_payload = txin_prev_tx.extra_payload
+            extra_data = b''
+            if txtype != STANDARD_TX and extra_payload:
+                extra_payload = extra_payload.serialize()
+                extra_data = bfh(var_int(len(extra_payload))) + extra_payload
             inputs.append([txin_prev_tx_raw,
                            txin.prevout.out_idx,
                            redeemScript,
                            txin.prevout.txid.hex(),
                            my_pubkey,
                            txin.nsequence,
-                           txin.value_sats()])
+                           txin.value_sats(),
+                           extra_data])
             inputsPaths.append(full_path)
 
         # Sanity check
@@ -450,6 +614,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
                     redeemScripts.append(bfh(utxo[2]))
                 elif (not p2shTransaction) or client_electrum.supports_multi_output():
                     txtmp = bitcoinTransaction(bfh(utxo[0]))
+                    txtmp.extra_data = utxo[7]
                     trustedInput = client_ledger.getTrustedInput(txtmp, utxo[1])
                     trustedInput['sequence'] = sequence
                     if segwitTransaction:
@@ -472,7 +637,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
             client_ledger.enableAlternate2fa(False)
             if segwitTransaction:
                 client_ledger.startUntrustedTransaction(True, inputIndex,
-                                                            chipInputs, redeemScripts[inputIndex], version=tx.version)
+                                                            chipInputs, redeemScripts[inputIndex], version=tx.serialize_version_field_to_network())
                 # we don't set meaningful outputAddress, amount and fees
                 # as we only care about the alternateEncoding==True branch
                 outputData = client_ledger.finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
@@ -487,7 +652,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
                 while inputIndex < len(inputs):
                     singleInput = [ chipInputs[inputIndex] ]
                     client_ledger.startUntrustedTransaction(False, 0,
-                                                            singleInput, redeemScripts[inputIndex], version=tx.version)
+                                                            singleInput, redeemScripts[inputIndex], version=tx.serialize_version_field_to_network())
                     inputSignature = client_ledger.untrustedHashSign(inputsPaths[inputIndex], pin, lockTime=tx.locktime)
                     inputSignature[0] = 0x30 # force for 1.4.9+
                     my_pubkey = inputs[inputIndex][4]
@@ -498,7 +663,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
             else:
                 while inputIndex < len(inputs):
                     client_ledger.startUntrustedTransaction(firstTransaction, inputIndex,
-                                                                chipInputs, redeemScripts[inputIndex], version=tx.version)
+                                                                chipInputs, redeemScripts[inputIndex], version=tx.serialize_version_field_to_network())
                     # we don't set meaningful outputAddress, amount and fees
                     # as we only care about the alternateEncoding==True branch
                     outputData = client_ledger.finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
