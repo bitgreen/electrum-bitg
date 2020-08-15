@@ -48,6 +48,8 @@ from .bitcoin import (TYPE_ADDRESS, TYPE_SCRIPT, hash_160,
                       int_to_hex, push_script, b58_address_to_hash160,
                       opcodes, add_number_to_script, base_decode, is_segwit_script_type)
 from .crypto import sha256d
+from .dash_tx import (ProTxBase, read_extra_payload, serialize_extra_payload,
+                      to_varbytes, STANDARD_TX)
 from .logging import get_logger
 
 if TYPE_CHECKING:
@@ -87,7 +89,6 @@ class MissingTxInputAmount(Exception):
 
 
 SIGHASH_ALL = 1
-
 
 class TxOutput:
     scriptpubkey: bytes
@@ -538,7 +539,8 @@ class Transaction:
         self._outputs = None  # type: List[TxOutput]
         self._locktime = 0
         self._version = 2
-        self._txtype = 1
+        self._txtype = STANDARD_TX
+        self._extra_payload = b''
 
         self._cached_txid = None  # type: Optional[str]
 
@@ -549,6 +551,15 @@ class Transaction:
     @locktime.setter
     def locktime(self, value):
         self._locktime = value
+        self.invalidate_ser_cache()
+
+    @property
+    def extra_payload(self):
+        return self._extra_payload
+
+    @extra_payload.setter
+    def extra_payload(self, value):
+        self._extra_payload = value
         self.invalidate_ser_cache()
 
     @property
@@ -574,6 +585,7 @@ class Transaction:
             'version': self.version,
             'txtype': self.txtype,
             'locktime': self.locktime,
+            'extra_payload': self.extra_payload,
             'inputs': [txin.to_json() for txin in self.inputs()],
             'outputs': [txout.to_json() for txout in self.outputs()],
         }
@@ -619,6 +631,10 @@ class Transaction:
             for txin in self._inputs:
                 parse_witness(vds, txin)
         self._locktime = vds.read_uint32()
+        if self._txtype != STANDARD_TX:
+            self._extra_payload = read_extra_payload(vds, self._txtype)
+        else:
+            self._extra_payload = b''
         if vds.can_read_more():
             raise SerializationError('extra junk at the end')
 
@@ -834,6 +850,10 @@ class Transaction:
                                                for txin in inputs)
         txouts = var_int(len(outputs)) + ''.join(o.serialize_to_network().hex() for o in outputs)
 
+        vExtra = ''
+        if self.txtype != STANDARD_TX:
+            vExtra = bh2u(to_varbytes(serialize_extra_payload(self)))
+
         use_segwit_ser_for_estimate_size = estimate_size and self.is_segwit(guess_for_address=True)
         use_segwit_ser_for_actual_use = not estimate_size and self.is_segwit()
         use_segwit_ser = use_segwit_ser_for_estimate_size or use_segwit_ser_for_actual_use
@@ -841,9 +861,9 @@ class Transaction:
             marker = '00'
             flag = '01'
             witness = ''.join(self.serialize_witness(x, estimate_size=estimate_size) for x in inputs)
-            return nVersion + nTxType + marker + flag + txins + txouts + witness + nLocktime
+            return nVersion + nTxType + marker + flag + txins + txouts + witness + nLocktime + vExtra
         else:
-            return nVersion + nTxType + txins + txouts + nLocktime
+            return nVersion + nTxType + txins + txouts + nLocktime + vExtra
 
     def txid(self) -> Optional[str]:
         if self._cached_txid is None:
@@ -1126,6 +1146,7 @@ class PSBTSection:
         return key_type_bytes + key
 
     def _serialize_psbt_section(self, fd):
+        print("---------------_serialize_psbt_section-------------------")
         wr = self.create_psbt_writer(fd)
         self.serialize_psbt_section_kvs(wr)
         fd.write(b'\x00')  # section-separator
@@ -1656,7 +1677,7 @@ class PartialTransaction(Transaction):
 
     @classmethod
     def from_io(cls, inputs: Sequence[PartialTxInput], outputs: Sequence[PartialTxOutput], *,
-                locktime: int = None, version: int = None):
+                locktime: int = None, version: int = None, tx_type: int = STANDARD_TX, extra_payload = b''):
         self = cls(None)
         self._inputs = list(inputs)
         self._outputs = list(outputs)
@@ -1664,6 +1685,10 @@ class PartialTransaction(Transaction):
             self.locktime = locktime
         if version is not None:
             self.version = version
+        if tx_type != None or tx_type != STANDARD_TX:
+            self.version = 2
+            self.tx_type = tx_type
+            self.extra_payload = extra_payload
         self.BIP69_sort()
         return self
 
@@ -1789,6 +1814,11 @@ class PartialTransaction(Transaction):
             raise Exception("only SIGHASH_ALL signing is supported!")
         nHashType = int_to_hex(sighash, 4)
         preimage_script = self.get_preimage_script(txin)
+
+        vExtra = ''
+        if self.txtype != STANDARD_TX:
+            vExtra = bh2u(to_varbytes(serialize_extra_payload(self)))
+
         if self.is_segwit_input(txin):
             if bip143_shared_txdigest_fields is None:
                 bip143_shared_txdigest_fields = self._calc_bip143_shared_txdigest_fields()
@@ -1799,12 +1829,13 @@ class PartialTransaction(Transaction):
             scriptCode = var_int(len(preimage_script) // 2) + preimage_script
             amount = int_to_hex(txin.value_sats(), 8)
             nSequence = int_to_hex(txin.nsequence, 4)
-            preimage = nVersion + nTxType + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
+            preimage = nVersion + nTxType + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + vExtra + nHashType
         else:
             txins = var_int(len(inputs)) + ''.join(self.serialize_input(txin, preimage_script if txin_index==k else '')
                                                    for k, txin in enumerate(inputs))
             txouts = var_int(len(outputs)) + ''.join(o.serialize_to_network().hex() for o in outputs)
-            preimage = nVersion + nTxType + txins + txouts + nLocktime + nHashType
+            preimage = nVersion + nTxType + txins + txouts + nLocktime + vExtra + nHashType
+
         return preimage
 
     def sign(self, keypairs) -> None:
