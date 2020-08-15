@@ -580,6 +580,11 @@ class Transaction:
         self._txtype = value
         self.invalidate_ser_cache()
 
+    def serialize_version_field_to_network(self):
+        nVersion = int_to_hex(self.version, 2)
+        nTxType = int_to_hex(self.txtype, 2)
+        return nVersion + nTxType
+
     def to_json(self) -> dict:
         d = {
             'version': self.version,
