@@ -764,14 +764,23 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
     def export_invoices(self, path):
         write_json_file(path, list(self.invoices.values()))
 
-    def get_relevant_invoice_keys_for_tx(self, tx: Transaction) -> Set[str]:
+    def _get_relevant_invoice_keys_for_tx(self, tx: Transaction) -> Set[str]:
         relevant_invoice_keys = set()
-        for txout in tx.outputs():
-            for invoice_key in self._invoices_from_scriptpubkey_map.get(txout.scriptpubkey, set()):
-                # note: the invoice might have been deleted since, so check now:
-                if invoice_key in self.invoices:
-                    relevant_invoice_keys.add(invoice_key)
+        with self.transaction_lock:
+            for txout in tx.outputs():
+                for invoice_key in self._invoices_from_scriptpubkey_map.get(txout.scriptpubkey, set()):
+                    # note: the invoice might have been deleted since, so check now:
+                    if invoice_key in self.invoices:
+                        relevant_invoice_keys.add(invoice_key)
         return relevant_invoice_keys
+
+    def get_relevant_invoices_for_tx(self, tx: Transaction) -> Sequence[OnchainInvoice]:
+        invoice_keys = self._get_relevant_invoice_keys_for_tx(tx)
+        invoices = [self.get_invoice(key) for key in invoice_keys]
+        invoices = [inv for inv in invoices if inv]  # filter out None
+        for inv in invoices:
+            assert isinstance(inv, OnchainInvoice), f"unexpected type {type(inv)}"
+        return invoices
 
     def _prepare_onchain_invoice_paid_detection(self):
         # scriptpubkey -> list(invoice_keys)
@@ -808,16 +817,13 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         return self._is_onchain_invoice_paid(invoice)[0]
 
     def _maybe_set_tx_label_based_on_invoices(self, tx: Transaction) -> bool:
+        # note: this is not done in 'get_default_label' as that would require deserializing each tx
         tx_hash = tx.txid()
-        with self.transaction_lock:
-            labels = []
-            for invoice_key in self.get_relevant_invoice_keys_for_tx(tx):
-                invoice = self.invoices.get(invoice_key)
-                if invoice is None: continue
-                assert isinstance(invoice, OnchainInvoice)
-                if invoice.message:
-                    labels.append(invoice.message)
-        if labels:
+        labels = []
+        for invoice in self.get_relevant_invoices_for_tx(tx):
+            if invoice.message:
+                labels.append(invoice.message)
+        if labels and not self.labels.get(tx_hash, ''):
             self.set_label(tx_hash, "; ".join(labels))
         return bool(labels)
 
@@ -873,11 +879,16 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
             item['value'] = Satoshis(value)
             balance += value
             item['balance'] = Satoshis(balance)
-            if fx:
-                timestamp = item['timestamp'] or now
-                fiat_value = value / Decimal(bitcoin.COIN) * fx.timestamp_rate(timestamp)
-                item['fiat_value'] = Fiat(fiat_value, fx.ccy)
-                item['fiat_default'] = True
+            if fx and fx.is_enabled() and fx.get_history_config():
+                txid = item.get('txid')
+                if not item.get('lightning') and txid:
+                    fiat_fields = self.get_tx_item_fiat(txid, value, fx, item['fee_sat'])
+                    item.update(fiat_fields)
+                else:
+                    timestamp = item['timestamp'] or now
+                    fiat_value = value / Decimal(bitcoin.COIN) * fx.timestamp_rate(timestamp)
+                    item['fiat_value'] = Fiat(fiat_value, fx.ccy)
+                    item['fiat_default'] = True
         return transactions
 
     @profiler
@@ -1078,7 +1089,9 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
             return tx
         return candidate
 
-    def get_change_addresses_for_new_transaction(self, preferred_change_addr=None) -> List[str]:
+    def get_change_addresses_for_new_transaction(
+            self, preferred_change_addr=None, *, allow_reuse: bool = True,
+    ) -> List[str]:
         change_addrs = []
         if preferred_change_addr:
             if isinstance(preferred_change_addr, (list, tuple)):
@@ -1095,6 +1108,8 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
                 change_addrs = addrs
             else:
                 # if there are none, take one randomly from the last few
+                if not allow_reuse:
+                    return []
                 addrs = self.get_change_addresses(slice_start=-self.gap_limit_for_change)
                 change_addrs = [random.choice(addrs)] if addrs else []
         for addr in change_addrs:
@@ -1104,6 +1119,17 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
             self.check_address_for_corruption(addr)
         max_change = self.max_change_outputs if self.multiple_change else 1
         return change_addrs[:max_change]
+
+    def get_single_change_address_for_new_transaction(
+            self, preferred_change_addr=None, *, allow_reuse: bool = True,
+    ) -> Optional[str]:
+        addrs = self.get_change_addresses_for_new_transaction(
+            preferred_change_addr=preferred_change_addr,
+            allow_reuse=allow_reuse,
+        )
+        if addrs:
+            return addrs[0]
+        return None
 
     @check_returned_address_for_corruption
     def get_new_sweep_address_for_channel(self) -> str:
@@ -1334,6 +1360,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
                             f"target rate was {new_fee_rate}")
 
         tx_new.locktime = get_locktime_for_new_transaction(self.network)
+        tx_new.add_info_from_wallet(self)
         return tx_new
 
     def _bump_fee_through_coinchooser(self, *, tx: Transaction, new_fee_rate: Union[int, Decimal],
@@ -1434,12 +1461,15 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         item = coins.get(TxOutpoint.from_str(txid+':%d'%i))
         if not item:
             return
-        self.add_input_info(item)
         inputs = [item]
-        out_address = self.get_unused_address() or address
+        out_address = (self.get_single_change_address_for_new_transaction(allow_reuse=False)
+                       or self.get_unused_address()
+                       or address)
         outputs = [PartialTxOutput.from_address_and_value(out_address, value - fee)]
         locktime = get_locktime_for_new_transaction(self.network)
-        return PartialTransaction.from_io(inputs, outputs, locktime=locktime)
+        tx_new = PartialTransaction.from_io(inputs, outputs, locktime=locktime)
+        tx_new.add_info_from_wallet(self)
+        return tx_new
 
     @abstractmethod
     def _add_input_sig_info(self, txin: PartialTxInput, address: str, *, only_der_suffix: bool = True) -> None:
@@ -1777,7 +1807,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
             addr = self.get_txout_address(txo)
             if addr in self.receive_requests:
                 status = self.get_request_status(addr)
-                util.trigger_callback('request_status', addr, status)
+                util.trigger_callback('request_status', self, addr, status)
 
     def make_payment_request(self, address, amount_sat, message, expiration):
         # TODO maybe merge with wallet.create_invoice()...
@@ -1973,11 +2003,14 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
         lp = sum([coin.value_sats() for coin in coins]) * p / Decimal(COIN)
         return lp - ap
 
-    def average_price(self, txid, price_func, ccy):
+    def average_price(self, txid, price_func, ccy) -> Decimal:
         """ Average acquisition price of the inputs of a transaction """
         input_value = 0
         total_price = 0
-        for addr in self.db.get_txi_addresses(txid):
+        txi_addresses = self.db.get_txi_addresses(txid)
+        if not txi_addresses:
+            return Decimal('NaN')
+        for addr in txi_addresses:
             d = self.db.get_txi_addr(txid, addr)
             for ser, v in d:
                 input_value += v
@@ -1987,7 +2020,7 @@ class Abstract_Wallet(AddressSynchronizer, ABC):
     def clear_coin_price_cache(self):
         self._coin_price_cache = {}
 
-    def coin_price(self, txid, price_func, ccy, txin_value):
+    def coin_price(self, txid, price_func, ccy, txin_value) -> Decimal:
         """
         Acquisition price of a coin.
         This assumes that either all inputs are mine, or no input is mine.

@@ -315,6 +315,13 @@ class CoinGecko(ExchangeBase):
                      for h in history['prices']])
 
 
+class CointraderMonitor(ExchangeBase):
+
+    async def get_rates(self, ccy):
+        json = await self.get_json('cointradermonitor.com', '/api/pbb/v1/ticker')
+        return {'BRL': Decimal(json['last'])}
+
+
 class itBit(ExchangeBase):
 
     async def get_rates(self, ccy):
@@ -352,12 +359,6 @@ class MercadoBitcoin(ExchangeBase):
         return {'BRL': Decimal(json['ticker_1h']['exchanges']['MBT']['last'])}
 
 
-class NegocieCoins(ExchangeBase):
-
-    async def get_rates(self,ccy):
-        json = await self.get_json('api.bitvalor.com', '/v1/ticker.json')
-        return {'BRL': Decimal(json['ticker_1h']['exchanges']['NEG']['last'])}
-
 class TheRockTrading(ExchangeBase):
 
     async def get_rates(self, ccy):
@@ -387,6 +388,20 @@ class Zaif(ExchangeBase):
     async def get_rates(self, ccy):
         json = await self.get_json('api.zaif.jp', '/api/1/last_price/bitg_jpy')
         return {'JPY': Decimal(json['last_price'])}
+
+
+class Bitragem(ExchangeBase):
+
+    async def get_rates(self,ccy):
+        json = await self.get_json('api.bitragem.com', '/v1/index?asset=BTC&market=BRL')
+        return {'BRL': Decimal(json['response']['index'])}
+
+
+class Biscoint(ExchangeBase):
+
+    async def get_rates(self,ccy):
+        json = await self.get_json('api.biscoint.io', '/v1/ticker?base=BTC&quote=BRL')
+        return {'BRL': Decimal(json['data']['last'])}
 
 
 def dictinvert(d):

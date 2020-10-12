@@ -38,6 +38,7 @@ from collections import defaultdict
 from enum import IntEnum
 import itertools
 import binascii
+import copy
 
 from . import ecc, bitcoin, constants, segwit_addr, bip32
 from .bip32 import BIP32Node
@@ -46,7 +47,8 @@ from .bitcoin import (TYPE_ADDRESS, TYPE_SCRIPT, hash_160,
                       hash160_to_p2sh, hash160_to_p2pkh, hash_to_segwit_addr,
                       var_int, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC, COIN,
                       int_to_hex, push_script, b58_address_to_hash160,
-                      opcodes, add_number_to_script, base_decode, is_segwit_script_type)
+                      opcodes, add_number_to_script, base_decode, is_segwit_script_type,
+                      base_encode)
 from .crypto import sha256d
 from .dash_tx import (ProTxBase, read_extra_payload, serialize_extra_payload,
                       to_varbytes, STANDARD_TX)
@@ -546,10 +548,12 @@ class Transaction:
 
     @property
     def locktime(self):
+        self.deserialize()
         return self._locktime
 
     @locktime.setter
-    def locktime(self, value):
+    def locktime(self, value: int):
+        assert isinstance(value, int), f"locktime must be int, not {value!r}"
         self._locktime = value
         self.invalidate_ser_cache()
 
@@ -564,6 +568,7 @@ class Transaction:
 
     @property
     def version(self):
+        self.deserialize()
         return self._version
 
     @version.setter
@@ -870,6 +875,15 @@ class Transaction:
         else:
             return nVersion + nTxType + txins + txouts + nLocktime + vExtra
 
+    def to_qr_data(self) -> str:
+        """Returns tx as data to be put into a QR code. No side-effects."""
+        tx = copy.deepcopy(self)  # make copy as we mutate tx
+        if isinstance(tx, PartialTransaction):
+            # this makes QR codes a lot smaller (or just possible in the first place!)
+            tx.convert_all_utxos_to_witness_utxos()
+        tx_bytes = tx.serialize_as_bytes()
+        return base_encode(tx_bytes, base=43)
+
     def txid(self) -> Optional[str]:
         if self._cached_txid is None:
             self.deserialize()
@@ -1166,8 +1180,8 @@ class PSBTSection:
 class PartialTxInput(TxInput, PSBTSection):
     def __init__(self, *args, **kwargs):
         TxInput.__init__(self, *args, **kwargs)
-        self.utxo = None  # type: Optional[Transaction]
-        self.witness_utxo = None  # type: Optional[TxOutput]
+        self._utxo = None  # type: Optional[Transaction]
+        self._witness_utxo = None  # type: Optional[TxOutput]
         self.part_sigs = {}  # type: Dict[bytes, bytes]  # pubkey -> sig
         self.sighash = None  # type: Optional[int]
         self.bip32_paths = {}  # type: Dict[bytes, Tuple[bytes, Sequence[int]]]  # pubkey -> (xpub_fingerprint, path)
@@ -1184,6 +1198,26 @@ class PartialTxInput(TxInput, PSBTSection):
         self.spent_height = None  # type: Optional[int]  # height at which the TXO got spent
         self._is_p2sh_segwit = None  # type: Optional[bool]  # None means unknown
         self._is_native_segwit = None  # type: Optional[bool]  # None means unknown
+
+    @property
+    def utxo(self):
+        return self._utxo
+
+    @utxo.setter
+    def utxo(self, value: Optional[Transaction]):
+        self._utxo = value
+        self.validate_data()
+        self.ensure_there_is_only_one_utxo()
+
+    @property
+    def witness_utxo(self):
+        return self._witness_utxo
+
+    @witness_utxo.setter
+    def witness_utxo(self, value: Optional[TxOutput]):
+        self._witness_utxo = value
+        self.validate_data()
+        self.ensure_there_is_only_one_utxo()
 
     def to_json(self):
         d = super().to_json()
@@ -1217,6 +1251,10 @@ class PartialTxInput(TxInput, PSBTSection):
             if self.prevout.txid.hex() != self.utxo.txid():
                 raise PSBTInputConsistencyFailure(f"PSBT input validation: "
                                                   f"If a non-witness UTXO is provided, its hash must match the hash specified in the prevout")
+            if self.witness_utxo:
+                if self.utxo.outputs()[self.prevout.out_idx] != self.witness_utxo:
+                    raise PSBTInputConsistencyFailure(f"PSBT input validation: "
+                                                      f"If both non-witness UTXO and witness UTXO are provided, they must be consistent")
         # The following test is disabled, so we are willing to sign non-segwit inputs
         # without verifying the input amount. This means, given a maliciously modified PSBT,
         # for non-segwit inputs, we might end up burning coins as miner fees.
@@ -1248,16 +1286,12 @@ class PartialTxInput(TxInput, PSBTSection):
         if kt == PSBTInputType.NON_WITNESS_UTXO:
             if self.utxo is not None:
                 raise SerializationError(f"duplicate key: {repr(kt)}")
-            if self.witness_utxo is not None:
-                raise SerializationError(f"PSBT input cannot have both PSBT_IN_NON_WITNESS_UTXO and PSBT_IN_WITNESS_UTXO")
             self.utxo = Transaction(val)
             self.utxo.deserialize()
             if key: raise SerializationError(f"key for {repr(kt)} must be empty")
         elif kt == PSBTInputType.WITNESS_UTXO:
             if self.witness_utxo is not None:
                 raise SerializationError(f"duplicate key: {repr(kt)}")
-            if self.utxo is not None:
-                raise SerializationError(f"PSBT input cannot have both PSBT_IN_NON_WITNESS_UTXO and PSBT_IN_WITNESS_UTXO")
             self.witness_utxo = TxOutput.from_network_bytes(val)
             if key: raise SerializationError(f"key for {repr(kt)} must be empty")
         elif kt == PSBTInputType.PARTIAL_SIG:
@@ -1306,9 +1340,10 @@ class PartialTxInput(TxInput, PSBTSection):
             self._unknown[full_key] = val
 
     def serialize_psbt_section_kvs(self, wr):
+        self.ensure_there_is_only_one_utxo()
         if self.witness_utxo:
             wr(PSBTInputType.WITNESS_UTXO, self.witness_utxo.serialize_to_network())
-        elif self.utxo:
+        if self.utxo:
             wr(PSBTInputType.NON_WITNESS_UTXO, bfh(self.utxo.serialize_to_network(include_sigs=True)))
         for pk, val in sorted(self.part_sigs.items()):
             wr(PSBTInputType.PARTIAL_SIG, val, pk)
@@ -1429,8 +1464,8 @@ class PartialTxInput(TxInput, PSBTSection):
 
     def convert_utxo_to_witness_utxo(self) -> None:
         if self.utxo:
-            self.witness_utxo = self.utxo.outputs()[self.prevout.out_idx]
-            self.utxo = None  # type: Optional[Transaction]
+            self._witness_utxo = self.utxo.outputs()[self.prevout.out_idx]
+            self._utxo = None  # type: Optional[Transaction]
 
     def is_native_segwit(self) -> Optional[bool]:
         """Whether this input is native segwit. None means inconclusive."""
@@ -1558,8 +1593,8 @@ class PartialTxOutput(TxOutput, PSBTSection):
 
 class PartialTransaction(Transaction):
 
-    def __init__(self, raw_unsigned_tx):
-        Transaction.__init__(self, raw_unsigned_tx)
+    def __init__(self):
+        Transaction.__init__(self, None)
         self.xpubs = {}  # type: Dict[BIP32Node, Tuple[bytes, Sequence[int]]]  # intermediate bip32node -> (xfp, der_prefix)
         self._inputs = []  # type: List[PartialTxInput]
         self._outputs = []  # type: List[PartialTxOutput]
@@ -1576,7 +1611,7 @@ class PartialTransaction(Transaction):
 
     @classmethod
     def from_tx(cls, tx: Transaction) -> 'PartialTransaction':
-        res = cls(None)
+        res = cls()
         res._inputs = [PartialTxInput.from_txin(txin) for txin in tx.inputs()]
         res._outputs = [PartialTxOutput.from_txout(txout) for txout in tx.outputs()]
         res.version = tx.version
@@ -1683,7 +1718,7 @@ class PartialTransaction(Transaction):
     @classmethod
     def from_io(cls, inputs: Sequence[PartialTxInput], outputs: Sequence[PartialTxOutput], *,
                 locktime: int = None, version: int = None, tx_type: int = STANDARD_TX, extra_payload = b''):
-        self = cls(None)
+        self = cls()
         self._inputs = list(inputs)
         self._outputs = list(outputs)
         if locktime is not None:
